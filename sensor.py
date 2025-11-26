@@ -2,7 +2,7 @@ import serial
 import time
 
 class Sensor:
-    def __init__(self, COM_PORT="COM7"):
+    def __init__(self, COM_PORT="COM5"):
         self.ser = serial.Serial(COM_PORT, 250000)
 
     def read_data(self):
