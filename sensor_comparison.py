@@ -1,7 +1,5 @@
-import threading
 import datetime
 from sensor import Sensor
-from threading import Thread
 import os
 import time
 import csv
@@ -49,9 +47,10 @@ class SensorComparison:
             self.write2file([distance, temp, linec, measurement_delta, distance_timestamp])
 
     def write2file(self, array):
-        with open(self.raw_data_filepath, mode="a", newline="") as f:
-            writer = csv.writer(f)
+        with open(self.raw_data_filepath, mode="a", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
             writer.writerow(array)
+            
     def init_instruments(self):
         self.sensor = Sensor()
 
@@ -85,14 +84,143 @@ class SensorComparison:
         plt.grid()
         plt.show()
 
+    def create_lookup_table(self):
+        """Create a lookup table in a .h file that maps linear encoder positions to sensor distances"""
+        if not self.sensor_distances or not self.linear_encoder_positions:
+            print("No data available for creating lookup table.")
+            return
+        
+        # Create pairs of (linear_encoder_position, sensor_distance)
+        data_pairs = list(zip(self.linear_encoder_positions, self.sensor_distances))
+        
+        # Sort by linear encoder position
+        data_pairs.sort(key=lambda x: x[0])
+        
+        # Remove duplicates and average distances for same positions
+        lookup_dict = {}
+        for pos, dist in data_pairs:
+            pos_rounded = round(pos, 2)  # Round to 2 decimal places
+            if pos_rounded in lookup_dict:
+                lookup_dict[pos_rounded].append(dist)
+            else:
+                lookup_dict[pos_rounded] = [dist]
+        
+        # Average the distances for each position
+        averaged_lookup = {}
+        for pos, distances in lookup_dict.items():
+            averaged_lookup[pos] = sum(distances) / len(distances)
+        
+        # Generate .h file
+        dt = datetime.datetime.now()
+        time_string = dt.strftime("%H_%M_%S")
+        h_filename = f"lookup_table_{time_string}.h"
+        h_filepath = os.path.join(os.path.dirname(self.raw_data_filepath), h_filename)
+        
+        with open(h_filepath, 'w', encoding='utf-8') as h_file:
+            h_file.write("// Sensor Distance Lookup Table\n")
+            h_file.write("// Generated on: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            h_file.write("// Maps linear encoder positions (mm) to sensor distances (mm)\n\n")
+            h_file.write("#ifndef LOOKUP_TABLE_H\n")
+            h_file.write("#define LOOKUP_TABLE_H\n\n")
+            
+            sorted_positions = sorted(averaged_lookup.keys())
+            table_size = len(sorted_positions)
+            
+            # Create arrays for positions and distances
+            h_file.write("// Lookup table size\n")
+            h_file.write("#define LOOKUP_TABLE_SIZE {}\n\n".format(table_size))
+            
+            h_file.write("// Position array (mm)\n")
+            h_file.write("const float positions[LOOKUP_TABLE_SIZE] = {\n")
+            for i, pos in enumerate(sorted_positions):
+                comma = "," if i < len(sorted_positions) - 1 else ""
+                h_file.write("    {:.2f}f{}\n".format(pos, comma))
+            h_file.write("};\n\n")
+            
+            h_file.write("// Distance array (mm)\n")
+            h_file.write("const float distances[LOOKUP_TABLE_SIZE] = {\n")
+            for i, pos in enumerate(sorted_positions):
+                dist = averaged_lookup[pos]
+                comma = "," if i < len(sorted_positions) - 1 else ""
+                h_file.write("    {:.2f}f{}\n".format(dist, comma))
+            h_file.write("};\n\n")
+            
+            # Add helper functions
+            h_file.write("// Function to get distance for a given position (exact match)\n")
+            h_file.write("float getDistanceForPosition(float position) {\n")
+            h_file.write("    for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {\n")
+            h_file.write("        if (positions[i] == position) {\n")
+            h_file.write("            return distances[i];\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    return -1.0f; // Position not found\n")
+            h_file.write("}\n\n")
+            
+            h_file.write("// Function to get nearest distance for a position (interpolated)\n")
+            h_file.write("float getNearestDistance(float position) {\n")
+            h_file.write("    if (LOOKUP_TABLE_SIZE == 0) return -1.0f;\n")
+            h_file.write("    \n")
+            h_file.write("    // Check for exact match first\n")
+            h_file.write("    for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {\n")
+            h_file.write("        if (positions[i] == position) {\n")
+            h_file.write("            return distances[i];\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    // Find the two closest points for interpolation\n")
+            h_file.write("    if (position <= positions[0]) {\n")
+            h_file.write("        return distances[0]; // Return first value\n")
+            h_file.write("    }\n")
+            h_file.write("    if (position >= positions[LOOKUP_TABLE_SIZE - 1]) {\n")
+            h_file.write("        return distances[LOOKUP_TABLE_SIZE - 1]; // Return last value\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    // Linear interpolation between two points\n")
+            h_file.write("    for (int i = 0; i < LOOKUP_TABLE_SIZE - 1; i++) {\n")
+            h_file.write("        if (position > positions[i] && position < positions[i + 1]) {\n")
+            h_file.write("            float x1 = positions[i];\n")
+            h_file.write("            float y1 = distances[i];\n")
+            h_file.write("            float x2 = positions[i + 1];\n")
+            h_file.write("            float y2 = distances[i + 1];\n")
+            h_file.write("            \n")
+            h_file.write("            // Linear interpolation formula\n")
+            h_file.write("            float interpolated = y1 + (y2 - y1) * (position - x1) / (x2 - x1);\n")
+            h_file.write("            return interpolated;\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    return -1.0f; // Should not reach here\n")
+            h_file.write("}\n\n")
+            
+            h_file.write("// Function to get the closest position index in the lookup table\n")
+            h_file.write("int getClosestPositionIndex(float position) {\n")
+            h_file.write("    int closest_index = 0;\n")
+            h_file.write("    float min_diff = (position > positions[0]) ? position - positions[0] : positions[0] - position;\n")
+            h_file.write("    \n")
+            h_file.write("    for (int i = 1; i < LOOKUP_TABLE_SIZE; i++) {\n")
+            h_file.write("        float diff = (position > positions[i]) ? position - positions[i] : positions[i] - position;\n")
+            h_file.write("        if (diff < min_diff) {\n")
+            h_file.write("            min_diff = diff;\n")
+            h_file.write("            closest_index = i;\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    return closest_index;\n")
+            h_file.write("}\n\n")
+            
+            h_file.write("#endif // LOOKUP_TABLE_H\n")
+        
+        print(f"Lookup table created: {h_filepath}")
+        print(f"Table contains {len(averaged_lookup)} position-distance pairs")
+        
+        return h_filepath
+
     def cleanup(self):
         if os.path.exists(self.raw_data_filepath):
             os.remove(self.raw_data_filepath)
 
 if __name__ == "__main__":
     app = SensorComparison()
-
-
 
     total_time = 32
 
@@ -105,13 +233,17 @@ if __name__ == "__main__":
 
         print("SAVING DATA TO WORKBOOK AND CLEANING UP")
 
-        with open(app.raw_data_filepath, mode="r") as f:
-            reader = csv.reader(f)
+        with open(app.raw_data_filepath, mode="r", encoding="utf-8") as csv_file:
+            reader = csv.reader(csv_file)
             for row in reader:
                 new_row = [float(value) for value in row]
                 app.ws.append(new_row)
 
         app.wb.save(app.excel_filepath)
+        
+        # Create lookup table
+        app.create_lookup_table()
+        
         app.plot_results()
         app.cleanup()
         
