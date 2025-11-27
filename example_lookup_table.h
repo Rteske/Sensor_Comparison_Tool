@@ -88,4 +88,56 @@ int getClosestPositionIndex(float position) {
     return closest_index;
 }
 
+// Function to get the nearest position given a distance (reverse lookup)
+float getNearestPosition(float distance) {
+    if (LOOKUP_TABLE_SIZE == 0) return -1.0f;
+    
+    // Check for exact match first
+    for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {
+        if (distances[i] == distance) {
+            return positions[i];
+        }
+    }
+    
+    // Find the two closest distances for interpolation
+    if (distance <= distances[0]) {
+        return positions[0]; // Return first position
+    }
+    if (distance >= distances[LOOKUP_TABLE_SIZE - 1]) {
+        return positions[LOOKUP_TABLE_SIZE - 1]; // Return last position
+    }
+    
+    // Linear interpolation between two points using distance as input
+    for (int i = 0; i < LOOKUP_TABLE_SIZE - 1; i++) {
+        if (distance > distances[i] && distance < distances[i + 1]) {
+            float x1 = distances[i];    // distance1
+            float y1 = positions[i];    // position1
+            float x2 = distances[i + 1]; // distance2
+            float y2 = positions[i + 1]; // position2
+            
+            // Linear interpolation formula (reverse lookup)
+            float interpolated = y1 + (y2 - y1) * (distance - x1) / (x2 - x1);
+            return interpolated;
+        }
+    }
+    
+    return -1.0f; // Should not reach here
+}
+
+// Function to get the closest distance index in the lookup table (reverse search)
+int getClosestDistanceIndex(float distance) {
+    int closest_index = 0;
+    float min_diff = (distance > distances[0]) ? distance - distances[0] : distances[0] - distance;
+    
+    for (int i = 1; i < LOOKUP_TABLE_SIZE; i++) {
+        float diff = (distance > distances[i]) ? distance - distances[i] : distances[i] - distance;
+        if (diff < min_diff) {
+            min_diff = diff;
+            closest_index = i;
+        }
+    }
+    
+    return closest_index;
+}
+
 #endif // LOOKUP_TABLE_H

@@ -50,7 +50,7 @@ class SensorComparison:
         with open(self.raw_data_filepath, mode="a", newline="", encoding="utf-8") as file:
             writer = csv.writer(file)
             writer.writerow(array)
-            
+
     def init_instruments(self):
         self.sensor = Sensor()
 
@@ -208,10 +208,167 @@ class SensorComparison:
             h_file.write("    return closest_index;\n")
             h_file.write("}\n\n")
             
+            h_file.write("// Function to get the nearest position given a distance (reverse lookup)\n")
+            h_file.write("float getNearestPosition(float distance) {\n")
+            h_file.write("    if (LOOKUP_TABLE_SIZE == 0) return -1.0f;\n")
+            h_file.write("    \n")
+            h_file.write("    // Check for exact match first\n")
+            h_file.write("    for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {\n")
+            h_file.write("        if (distances[i] == distance) {\n")
+            h_file.write("            return positions[i];\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    // Find the two closest distances for interpolation\n")
+            h_file.write("    if (distance <= distances[0]) {\n")
+            h_file.write("        return positions[0]; // Return first position\n")
+            h_file.write("    }\n")
+            h_file.write("    if (distance >= distances[LOOKUP_TABLE_SIZE - 1]) {\n")
+            h_file.write("        return positions[LOOKUP_TABLE_SIZE - 1]; // Return last position\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    // Linear interpolation between two points using distance as input\n")
+            h_file.write("    for (int i = 0; i < LOOKUP_TABLE_SIZE - 1; i++) {\n")
+            h_file.write("        if (distance > distances[i] && distance < distances[i + 1]) {\n")
+            h_file.write("            float x1 = distances[i];    // distance1\n")
+            h_file.write("            float y1 = positions[i];    // position1\n")
+            h_file.write("            float x2 = distances[i + 1]; // distance2\n")
+            h_file.write("            float y2 = positions[i + 1]; // position2\n")
+            h_file.write("            \n")
+            h_file.write("            // Linear interpolation formula (reverse lookup)\n")
+            h_file.write("            float interpolated = y1 + (y2 - y1) * (distance - x1) / (x2 - x1);\n")
+            h_file.write("            return interpolated;\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    return -1.0f; // Should not reach here\n")
+            h_file.write("}\n\n")
+            
+            h_file.write("// Function to get the closest distance index in the lookup table (reverse search)\n")
+            h_file.write("int getClosestDistanceIndex(float distance) {\n")
+            h_file.write("    int closest_index = 0;\n")
+            h_file.write("    float min_diff = (distance > distances[0]) ? distance - distances[0] : distances[0] - distance;\n")
+            h_file.write("    \n")
+            h_file.write("    for (int i = 1; i < LOOKUP_TABLE_SIZE; i++) {\n")
+            h_file.write("        float diff = (distance > distances[i]) ? distance - distances[i] : distances[i] - distance;\n")
+            h_file.write("        if (diff < min_diff) {\n")
+            h_file.write("            min_diff = diff;\n")
+            h_file.write("            closest_index = i;\n")
+            h_file.write("        }\n")
+            h_file.write("    }\n")
+            h_file.write("    \n")
+            h_file.write("    return closest_index;\n")
+            h_file.write("}\n\n")
+            
             h_file.write("#endif // LOOKUP_TABLE_H\n")
         
         print(f"Lookup table created: {h_filepath}")
         print(f"Table contains {len(averaged_lookup)} position-distance pairs")
+        
+        return h_filepath
+
+    def create_error_correction_table(self, max_distance_mm=700):
+        """Create an error correction lookup table similar to the commented errorLookupTable in your C code"""
+        if not self.sensor_distances or not self.linear_encoder_positions:
+            print("No data available for creating error correction table.")
+            return
+        
+        # Create error correction array
+        correction_table = [0.0] * max_distance_mm
+        
+        # Calculate error for each measurement
+        for i, (actual_pos, measured_dist) in enumerate(zip(self.linear_encoder_positions, self.sensor_distances)):
+            error = measured_dist - actual_pos  # Error = measured - actual
+            # Convert to index (assuming mm resolution and starting from 0)
+            index = int(round(actual_pos))
+            if 0 <= index < max_distance_mm:
+                correction_table[index] = error
+        
+        # Fill gaps with interpolation
+        for i in range(1, len(correction_table) - 1):
+            if correction_table[i] == 0.0:  # No data point
+                # Find nearest non-zero values
+                left_val = 0.0
+                right_val = 0.0
+                left_idx = -1
+                right_idx = -1
+                
+                # Search left
+                for j in range(i - 1, -1, -1):
+                    if correction_table[j] != 0.0:
+                        left_val = correction_table[j]
+                        left_idx = j
+                        break
+                
+                # Search right
+                for j in range(i + 1, len(correction_table)):
+                    if correction_table[j] != 0.0:
+                        right_val = correction_table[j]
+                        right_idx = j
+                        break
+                
+                # Linear interpolation
+                if left_idx >= 0 and right_idx >= 0:
+                    distance = right_idx - left_idx
+                    weight = (i - left_idx) / distance
+                    correction_table[i] = left_val + weight * (right_val - left_val)
+                elif left_idx >= 0:
+                    correction_table[i] = left_val
+                elif right_idx >= 0:
+                    correction_table[i] = right_val
+        
+        # Generate .h file
+        dt = datetime.datetime.now()
+        time_string = dt.strftime("%H_%M_%S")
+        h_filename = f"error_correction_table_{time_string}.h"
+        h_filepath = os.path.join(os.path.dirname(self.raw_data_filepath), h_filename)
+        
+        with open(h_filepath, 'w', encoding='utf-8') as h_file:
+            h_file.write("// Error Correction Lookup Table\n")
+            h_file.write("// Generated on: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            h_file.write("// Provides correction factors for sensor readings\n\n")
+            h_file.write("#ifndef ERROR_CORRECTION_TABLE_H\n")
+            h_file.write("#define ERROR_CORRECTION_TABLE_H\n\n")
+            
+            h_file.write("// Error correction table size (mm resolution)\n")
+            h_file.write("#define ERROR_TABLE_SIZE {}\n\n".format(max_distance_mm))
+            
+            h_file.write("// Error correction lookup table (index = distance in mm, value = correction in mm)\n")
+            h_file.write("static const float errorLookupTable[ERROR_TABLE_SIZE] = {\n")
+            
+            # Write the array with 10 values per line for readability
+            for i in range(0, len(correction_table), 10):
+                h_file.write("    ")
+                for j in range(min(10, len(correction_table) - i)):
+                    idx = i + j
+                    comma = "," if idx < len(correction_table) - 1 else ""
+                    h_file.write("{:.5f}f{}".format(correction_table[idx], comma))
+                    if j < min(9, len(correction_table) - i - 1):
+                        h_file.write(", ")
+                h_file.write("\n")
+            
+            h_file.write("};\n\n")
+            
+            # Add helper function
+            h_file.write("// Function to get error correction for a given distance\n")
+            h_file.write("float getErrorCorrection(float distance_mm) {\n")
+            h_file.write("    int index = (int)(distance_mm + 0.5f); // Round to nearest mm\n")
+            h_file.write("    if (index >= 0 && index < ERROR_TABLE_SIZE) {\n")
+            h_file.write("        return errorLookupTable[index];\n")
+            h_file.write("    }\n")
+            h_file.write("    return 0.0f; // No correction available\n")
+            h_file.write("}\n\n")
+            
+            h_file.write("// Function to apply correction to a measured distance\n")
+            h_file.write("float applyCorrectedDistance(float measured_distance_mm) {\n")
+            h_file.write("    float correction = getErrorCorrection(measured_distance_mm);\n")
+            h_file.write("    return measured_distance_mm - correction; // Subtract error to get corrected value\n")
+            h_file.write("}\n\n")
+            
+            h_file.write("#endif // ERROR_CORRECTION_TABLE_H\n")
+        
+        print(f"Error correction table created: {h_filepath}")
+        print(f"Table contains {max_distance_mm} correction values")
         
         return h_filepath
 
@@ -241,8 +398,9 @@ if __name__ == "__main__":
 
         app.wb.save(app.excel_filepath)
         
-        # Create lookup table
+        # Create lookup tables
         app.create_lookup_table()
+        app.create_error_correction_table()
         
         app.plot_results()
         app.cleanup()
