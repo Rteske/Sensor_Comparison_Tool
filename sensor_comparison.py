@@ -29,10 +29,56 @@ class SensorComparison:
         self.linear_encoder_positions = []
         self.measurement_deltas = []
 
+        # Diagnostic data tracking
+        self.error_log = []
+        self.error_codes = []
+        self.error_counts = []
+        self.error_timestamps = []
+        self.total_errors = 0
+        self.last_error_code = 0
+        self.error_history = []
+        
+        # Error code name mapping
+        self.error_names = {
+            0: "NONE",
+            1: "CONFIG_CREATE",
+            2: "PROCESSING_CREATE",
+            3: "BUFFER_SIZE",
+            4: "BUFFER_ALLOC",
+            5: "SENSOR_CREATE",
+            6: "CALIBRATION",
+            7: "MEASURE",
+            8: "INTERRUPT_TIMEOUT",
+            9: "SENSOR_READ",
+            10: "RECALIBRATION",
+            11: "CAN_SEND"
+        }
+
         self.wb = openpyxl.load_workbook(self.template_filepath)
         self.ws = self.wb["RAW_DATA"]
 
         self.init_instruments()
+
+    def get_error_name(self, error_code):
+        """Convert error code to human-readable name"""
+        return self.error_names.get(error_code, f"UNKNOWN({error_code})")
+
+    def log_diagnostic_data(self, error_code, error_count, error_timestamp_ms):
+        """Log diagnostic error data from CAN messages"""
+        self.error_codes.append(error_code)
+        self.error_counts.append(error_count)
+        self.error_timestamps.append(time.time())
+        
+        error_entry = {
+            'code': error_code,
+            'name': self.get_error_name(error_code),
+            'count': error_count,
+            'device_timestamp_ms': error_timestamp_ms,
+            'system_timestamp': time.time()
+        }
+        self.error_log.append(error_entry)
+        
+        print(f"[DIAGNOSTIC] Error detected: {self.get_error_name(error_code)} (Code {error_code}), Count: {error_count}")
 
     def get_data(self):
         distance, temp, linec, distance_timestamp = self.sensor.get_current_distance()
@@ -372,6 +418,60 @@ class SensorComparison:
         
         return h_filepath
 
+    def print_diagnostic_summary(self):
+        """Print summary of all diagnostic data collected during the session"""
+        if self.error_log:
+            print("\n" + "="*50)
+            print("DIAGNOSTIC ERROR SUMMARY")
+            print("="*50)
+            print(f"Total errors detected: {len(self.error_log)}")
+            print(f"Last error code: {self.last_error_code} ({self.get_error_name(self.last_error_code)})")
+            print(f"Total error count: {self.total_errors}")
+            
+            # Count errors by type
+            error_type_counts = {}
+            for entry in self.error_log:
+                name = entry['name']
+                error_type_counts[name] = error_type_counts.get(name, 0) + 1
+            
+            print("\nError breakdown by type:")
+            for error_name, count in sorted(error_type_counts.items()):
+                print(f"  {error_name}: {count}")
+            
+            if self.error_history:
+                non_zero_history = [self.get_error_name(e) for e in self.error_history if e != 0]
+                if non_zero_history:
+                    print(f"\nError history: {non_zero_history}")
+            
+            print("="*50 + "\n")
+        else:
+            print("\n[DIAGNOSTIC] No errors detected during this session.\n")
+
+    def save_diagnostic_log(self):
+        """Save diagnostic error log to CSV file"""
+        if not self.error_log:
+            return
+        
+        dt = datetime.datetime.now()
+        time_string = dt.strftime("%H_%M_%S")
+        diag_filepath = os.path.join(os.path.dirname(self.raw_data_filepath), f"diagnostics_{time_string}.csv")
+        
+        with open(diag_filepath, mode="w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["Error Code", "Error Name", "Error Count", "Device Timestamp (ms)", "System Timestamp"])
+            
+            for entry in self.error_log:
+                writer.writerow([
+                    entry['code'],
+                    entry['name'],
+                    entry['count'],
+                    entry['device_timestamp_ms'],
+                    entry['system_timestamp']
+                ])
+        
+        print(f"Diagnostic log saved: {diag_filepath}")
+        return diag_filepath
+
     def cleanup(self):
         if os.path.exists(self.raw_data_filepath):
             os.remove(self.raw_data_filepath)
@@ -397,6 +497,10 @@ if __name__ == "__main__":
                 app.ws.append(new_row)
 
         app.wb.save(app.excel_filepath)
+        
+        # Print and save diagnostic information
+        app.print_diagnostic_summary()
+        app.save_diagnostic_log()
         
         # Create lookup tables
         app.create_lookup_table()
