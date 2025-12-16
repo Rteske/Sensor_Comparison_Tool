@@ -43,12 +43,33 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(encoderPinA), updateEncoder, CHANGE);  
 }
 
+// Helper: send compact framed binary message over Serial
+// Frame: [0x7E][type][len][payload...][chk]
+void sendFrame(uint8_t type, const uint8_t* payload, uint8_t len) {
+  uint8_t chk = type ^ len;
+  Serial.write(0x7E);
+  Serial.write(type);
+  Serial.write(len);
+  for (uint8_t i = 0; i < len; i++) {
+    Serial.write(payload[i]);
+    chk ^= payload[i];
+  }
+  Serial.write(chk);
+}
+
+// Helper: split 32-bit into 4 bytes (big-endian)
+void u32ToBytes(unsigned long v, uint8_t* out) {
+  out[0] = (v >> 24) & 0xFF;
+  out[1] = (v >> 16) & 0xFF;
+  out[2] = (v >> 8) & 0xFF;
+  out[3] = v & 0xFF;
+}
+
 void loop() {
   int packetSize = CAN.parsePacket();
 
   if (packetSize) {
-    Serial.println("Recieved Packet");
-    Serial.println();
+    // Packet received (binary framing used for output)
     uint32_t packetId = CAN.packetId();
     
     int data[8];
@@ -75,14 +96,19 @@ void loop() {
           unsigned long temp = ((unsigned long)data[6] << 8) |
                                 (unsigned long)data[7];
 
-          Serial.print("Distance:");
-          Serial.print(distance);
-          Serial.print("<>Divisor:");
-          Serial.print(divisor);
-          Serial.print("<>Temp:");
-          Serial.print(temp);
-          Serial.print("<>ENCODER:");
-          Serial.println(encoderPos);
+          // Pack: distance (4), temp (2), encoderPos (4)
+          uint8_t payload[10];
+          u32ToBytes(distance, payload);
+          payload[4] = (temp >> 8) & 0xFF;
+          payload[5] = temp & 0xFF;
+          // encoderPos as 32-bit
+          long ep = encoderPos;
+          payload[6] = (ep >> 24) & 0xFF;
+          payload[7] = (ep >> 16) & 0xFF;
+          payload[8] = (ep >> 8) & 0xFF;
+          payload[9] = ep & 0xFF;
+          // type 0x10 = telemetry distance
+          sendFrame(0x10, payload, 10);
           break;
         }
         
@@ -97,10 +123,12 @@ void loop() {
                                              ((unsigned long)data[6] << 8) |
                                              (unsigned long)data[7];
 
-          Serial.print("MaxAmp:");
-          Serial.print(max_amplitude);
-          Serial.print("<>ThresholdY:");
-          Serial.println(first_threshold_y);
+          // Pack: max_amplitude (4), first_threshold_y (4)
+          uint8_t payloadA[8];
+          u32ToBytes(max_amplitude, payloadA);
+          u32ToBytes(first_threshold_y, payloadA + 4);
+          // type 0x11 = telemetry amplitude
+          sendFrame(0x11, payloadA, 8);
           break;
         }
         
@@ -115,10 +143,12 @@ void loop() {
                                        ((unsigned long)data[6] << 8) |
                                        (unsigned long)data[7];
 
-          Serial.print("[DIAG] ErrorCode:");
-          Serial.print(error_code);
-          Serial.print(" Count:");
-          Serial.println(error_count);
+          // Pack: error_code (4), error_count (4)
+          uint8_t payloadE[8];
+          u32ToBytes(error_code, payloadE);
+          u32ToBytes(error_count, payloadE + 4);
+          // type 0xA0 = diag error code + count
+          sendFrame(0xA0, payloadE, 8);
           break;
         }
         
@@ -129,9 +159,11 @@ void loop() {
                                      ((unsigned long)data[2] << 8) |
                                      (unsigned long)data[3];
 
-          Serial.print("[DIAG] ErrorTimestamp:");
-          Serial.print(timestamp);
-          Serial.println(" ms");
+          // Pack: timestamp (4)
+          uint8_t payloadT[4];
+          u32ToBytes(timestamp, payloadT);
+          // type 0xA1 = diag timestamp
+          sendFrame(0xA1, payloadT, 4);
           break;
         }
         
@@ -146,10 +178,12 @@ void loop() {
                                       ((unsigned long)data[6] << 8) |
                                       (unsigned long)data[7];
 
-          Serial.print("[DIAG] TotalErrors:");
-          Serial.print(total_errors);
-          Serial.print(" LastError:");
-          Serial.println(last_error);
+          // Pack: total_errors (4), last_error (4)
+          uint8_t payloadS[8];
+          u32ToBytes(total_errors, payloadS);
+          u32ToBytes(last_error, payloadS + 4);
+          // type 0xA2 = diag stats
+          sendFrame(0xA2, payloadS, 8);
           break;
         }
         
@@ -161,23 +195,28 @@ void loop() {
           unsigned int error4 = data[3];
           unsigned int chunk = data[4];
 
-          Serial.print("[DIAG] ErrorHistory Chunk ");
-          Serial.print(chunk);
-          Serial.print(": [");
-          Serial.print(error1);
-          Serial.print(",");
-          Serial.print(error2);
-          Serial.print(",");
-          Serial.print(error3);
-          Serial.print(",");
-          Serial.print(error4);
-          Serial.println("]");
+          // Pack: error1,error2,error3,error4,chunk (5 bytes)
+          uint8_t payloadH[5];
+          payloadH[0] = error1 & 0xFF;
+          payloadH[1] = error2 & 0xFF;
+          payloadH[2] = error3 & 0xFF;
+          payloadH[3] = error4 & 0xFF;
+          payloadH[4] = chunk & 0xFF;
+          // type 0xA3 = diag history chunk
+          sendFrame(0xA3, payloadH, 5);
           break;
         }
         
         default:
-          Serial.print("Unknown CAN ID: 0x");
-          Serial.println(packetId, HEX);
+          // Send unknown ID frame (type 0xAF) with 4-byte id payload
+          {
+            uint8_t payloadU[4];
+            payloadU[0] = (packetId >> 24) & 0xFF;
+            payloadU[1] = (packetId >> 16) & 0xFF;
+            payloadU[2] = (packetId >> 8) & 0xFF;
+            payloadU[3] = packetId & 0xFF;
+            sendFrame(0xAF, payloadU, 4);
+          }
           break;
       }
     }

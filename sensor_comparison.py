@@ -7,6 +7,7 @@ import sys
 import numpy as np
 import openpyxl
 import matplotlib.pyplot as plt
+import struct
 
 class SensorComparison:
     def __init__(self):
@@ -51,11 +52,15 @@ class SensorComparison:
             8: "INTERRUPT_TIMEOUT",
             9: "SENSOR_READ",
             10: "RECALIBRATION",
-            11: "CAN_SEND"
+            11: "CAN_SEND",
+            12: "ALGO_ERROR_EXCEEDED_MAX_DISTANCE",
         }
 
         self.wb = openpyxl.load_workbook(self.template_filepath)
         self.ws = self.wb["RAW_DATA"]
+
+        # Temporary storage to correlate diagnostic frames
+        self._pending_diag = {}
 
         self.init_instruments()
 
@@ -81,16 +86,78 @@ class SensorComparison:
         print(f"[DIAGNOSTIC] Error detected: {self.get_error_name(error_code)} (Code {error_code}), Count: {error_count}")
 
     def get_data(self):
-        distance, temp, linec, distance_timestamp = self.sensor.get_current_distance()
-        if distance != "NA":
+        # Read any available frame and handle telemetry or diagnostic frames
+        frame_type, payload = self.sensor.read_frame(timeout_s=0.05)
+        if frame_type is None:
+            return
+
+        ts = time.time()
+        # Telemetry distance frame (type 0x10): distance(4)|temp(2)|encoder(4)
+        if frame_type == 0x10 and payload and len(payload) >= 10:
+            distance_raw = struct.unpack('>I', payload[0:4])[0]
+            temp_raw = struct.unpack('>H', payload[4:6])[0]
+            encoder_raw = int.from_bytes(payload[6:10], byteorder='big', signed=True)
+
+            distance = distance_raw / 10.0
+            temp = float(temp_raw)
+            linec = float(encoder_raw) * 0.01
+
             measurement_delta = abs(linec - distance)
             self.sensor_distances.append(distance)
-            self.sensor_timestamps.append(distance_timestamp)
+            self.sensor_timestamps.append(ts)
             self.linear_encoder_positions.append(linec)
             self.measurement_deltas.append(measurement_delta)
-            
+
             print(f"Delta: {measurement_delta}, Linear Encoder: {linec}, Distance: {distance}")
-            self.write2file([distance, temp, linec, measurement_delta, distance_timestamp])
+            self.write2file([distance, temp, linec, measurement_delta, ts])
+
+        # Amplitude telemetry (type 0x11) - currently ignored but could be stored
+        elif frame_type == 0x11 and payload and len(payload) >= 8:
+            # optional: parse and log amplitude
+            pass
+
+        # Diagnostic frames
+        elif frame_type == 0xA0 and payload and len(payload) >= 8:
+            # error_code(4), error_count(4)
+            error_code = struct.unpack('>I', payload[0:4])[0]
+            error_count = struct.unpack('>I', payload[4:8])[0]
+            # store until timestamp arrives
+            self._pending_diag['code'] = error_code
+            self._pending_diag['count'] = error_count
+
+        elif frame_type == 0xA1 and payload and len(payload) >= 4:
+            # error timestamp (ms)
+            error_timestamp_ms = struct.unpack('>I', payload[0:4])[0]
+            # if we have a pending code/count, log it
+            code = self._pending_diag.get('code')
+            count = self._pending_diag.get('count')
+            if code is not None and count is not None:
+                self.log_diagnostic_data(code, count, error_timestamp_ms)
+                # clear pending
+                self._pending_diag.pop('code', None)
+                self._pending_diag.pop('count', None)
+
+        elif frame_type == 0xA2 and payload and len(payload) >= 8:
+            # total_errors(4), last_error(4)
+            total_errors = struct.unpack('>I', payload[0:4])[0]
+            last_error = struct.unpack('>I', payload[4:8])[0]
+            self.total_errors = total_errors
+            self.last_error_code = last_error
+            print(f"[DIAG] TotalErrors: {total_errors} LastError: {last_error}")
+
+        elif frame_type == 0xA3 and payload and len(payload) >= 5:
+            # error history chunk: 4 errors + chunk id
+            e1 = payload[0]
+            e2 = payload[1]
+            e3 = payload[2]
+            e4 = payload[3]
+            chunk = payload[4]
+            self.error_history.extend([e1, e2, e3, e4])
+            print(f"[DIAG] ErrorHistory Chunk {chunk}: [{e1},{e2},{e3},{e4}]")
+
+        else:
+            # unknown or unhandled frame types
+            pass
 
     def write2file(self, array):
         with open(self.raw_data_filepath, mode="a", newline="", encoding="utf-8") as file:
@@ -479,7 +546,7 @@ class SensorComparison:
 if __name__ == "__main__":
     app = SensorComparison()
 
-    total_time = 32
+    total_time = 35
 
     t_start = time.time()
 
@@ -504,7 +571,6 @@ if __name__ == "__main__":
         
         # Create lookup tables
         app.create_lookup_table()
-        app.create_error_correction_table()
         
         app.plot_results()
         app.cleanup()
