@@ -55,6 +55,25 @@ class SensorComparison:
             11: "CAN_SEND",
             12: "ALGO_ERROR_EXCEEDED_MAX_DISTANCE",
         }
+        
+        # Performance timing data
+        self.timer_names = {
+            0: "TOTAL_FRAME",
+            1: "SENSOR_MEASURE",
+            2: "SENSOR_READ",
+            3: "PROCESSING_EXECUTE",
+            4: "CALIBRATION",
+            5: "THRESHOLD_ALGO",
+            6: "FIFO_AVERAGING",
+            7: "CAN_TRANSMIT",
+            8: "AMPLITUDE_CALC",
+            9: "THRESHOLD_CHECK",
+            10: "INTERPOLATION",
+            11: "LUT_LOOKUP",
+        }
+        
+        self.performance_data = {timer_id: {'avg': [], 'max': [], 'min': [], 'timestamps': []} 
+                                  for timer_id in range(12)}
 
         self.wb = openpyxl.load_workbook(self.template_filepath)
         self.ws = self.wb["RAW_DATA"]
@@ -155,6 +174,23 @@ class SensorComparison:
             self.error_history.extend([e1, e2, e3, e4])
             print(f"[DIAG] ErrorHistory Chunk {chunk}: [{e1},{e2},{e3},{e4}]")
 
+        # Performance timing data (type 0xB0)
+        elif frame_type == 0xB0 and payload and len(payload) >= 8:
+            timer_id = payload[0]
+            avg_us = (payload[1] << 8) | payload[2]
+            max_us = (payload[3] << 8) | payload[4]
+            min_us = (payload[5] << 8) | payload[6]
+            count = payload[7]
+            
+            if timer_id < 12:
+                self.performance_data[timer_id]['avg'].append(avg_us)
+                self.performance_data[timer_id]['max'].append(max_us)
+                self.performance_data[timer_id]['min'].append(min_us)
+                self.performance_data[timer_id]['timestamps'].append(ts)
+                
+                timer_name = self.timer_names.get(timer_id, f"UNKNOWN_{timer_id}")
+                print(f"[PERF] {timer_name}: avg={avg_us}us, max={max_us}us, min={min_us}us, count={count}")
+
         else:
             # unknown or unhandled frame types
             pass
@@ -196,6 +232,117 @@ class SensorComparison:
         plt.title("Delta vs Linear Encoder")
         plt.grid()
         plt.show()
+        
+        # Plot performance timing data
+        self.plot_performance_timing()
+    
+    def plot_performance_timing(self):
+        """Plot performance timing data for all timers"""
+        # Check if any performance data was collected
+        has_data = any(len(self.performance_data[tid]['avg']) > 0 for tid in range(12))
+        if not has_data:
+            print("No performance timing data collected for plotting.")
+            return
+        
+        # Create subplots for different timer groups
+        fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+        fig.suptitle('Performance Timing Analysis', fontsize=16)
+        
+        # Group 1: Main measurement loop timers (0-3)
+        ax1 = axes[0]
+        for timer_id in [0, 1, 2, 3]:  # TOTAL_FRAME, SENSOR_MEASURE, SENSOR_READ, PROCESSING_EXECUTE
+            if len(self.performance_data[timer_id]['avg']) > 0:
+                timer_name = self.timer_names[timer_id]
+                avg_values = self.performance_data[timer_id]['avg']
+                timestamps = self.performance_data[timer_id]['timestamps']
+                start_time = timestamps[0] if timestamps else 0
+                rel_times = [t - start_time for t in timestamps]
+                ax1.plot(rel_times, avg_values, label=timer_name, marker='o', markersize=3)
+        
+        ax1.set_xlabel('Time (seconds)')
+        ax1.set_ylabel('Execution Time (μs)')
+        ax1.set_title('Main Measurement Loop Timers')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Group 2: Processing timers (4-7)
+        ax2 = axes[1]
+        for timer_id in [4, 5, 6, 7]:  # CALIBRATION, THRESHOLD_ALGO, FIFO_AVERAGING, CAN_TRANSMIT
+            if len(self.performance_data[timer_id]['avg']) > 0:
+                timer_name = self.timer_names[timer_id]
+                avg_values = self.performance_data[timer_id]['avg']
+                timestamps = self.performance_data[timer_id]['timestamps']
+                start_time = timestamps[0] if timestamps else 0
+                rel_times = [t - start_time for t in timestamps]
+                ax2.plot(rel_times, avg_values, label=timer_name, marker='o', markersize=3)
+        
+        ax2.set_xlabel('Time (seconds)')
+        ax2.set_ylabel('Execution Time (μs)')
+        ax2.set_title('Processing & Communication Timers')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Group 3: Algorithm detail timers (8-11)
+        ax3 = axes[2]
+        for timer_id in [8, 9, 10, 11]:  # AMPLITUDE_CALC, THRESHOLD_CHECK, INTERPOLATION, LUT_LOOKUP
+            if len(self.performance_data[timer_id]['avg']) > 0:
+                timer_name = self.timer_names[timer_id]
+                avg_values = self.performance_data[timer_id]['avg']
+                timestamps = self.performance_data[timer_id]['timestamps']
+                start_time = timestamps[0] if timestamps else 0
+                rel_times = [t - start_time for t in timestamps]
+                ax3.plot(rel_times, avg_values, label=timer_name, marker='o', markersize=3)
+        
+        ax3.set_xlabel('Time (seconds)')
+        ax3.set_ylabel('Execution Time (μs)')
+        ax3.set_title('Algorithm Detail Timers')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Create a summary bar chart showing average execution times
+        fig2, ax = plt.subplots(figsize=(12, 6))
+        
+        timer_labels = []
+        avg_times = []
+        max_times = []
+        min_times = []
+        
+        for timer_id in range(12):
+            if len(self.performance_data[timer_id]['avg']) > 0:
+                timer_labels.append(self.timer_names[timer_id])
+                avg_times.append(np.mean(self.performance_data[timer_id]['avg']))
+                max_times.append(np.max(self.performance_data[timer_id]['max']))
+                min_times.append(np.min(self.performance_data[timer_id]['min']))
+        
+        if timer_labels:
+            x = np.arange(len(timer_labels))
+            width = 0.25
+            
+            ax.bar(x - width, min_times, width, label='Min', color='green', alpha=0.7)
+            ax.bar(x, avg_times, width, label='Avg', color='blue', alpha=0.7)
+            ax.bar(x + width, max_times, width, label='Max', color='red', alpha=0.7)
+            
+            ax.set_xlabel('Timer')
+            ax.set_ylabel('Execution Time (μs)')
+            ax.set_title('Performance Timing Summary (Min/Avg/Max)')
+            ax.set_xticks(x)
+            ax.set_xticklabels(timer_labels, rotation=45, ha='right')
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            plt.tight_layout()
+            plt.show()
+            
+            # Print summary statistics
+            print("\n" + "="*60)
+            print("PERFORMANCE TIMING SUMMARY")
+            print("="*60)
+            for i, label in enumerate(timer_labels):
+                print(f"{label:25} Min: {min_times[i]:8.2f}μs  Avg: {avg_times[i]:8.2f}μs  Max: {max_times[i]:8.2f}μs")
+            print("="*60 + "\n")
 
     def create_lookup_table(self):
         """Create a lookup table in a .h file that maps linear encoder positions to sensor distances"""
@@ -538,6 +685,36 @@ class SensorComparison:
         
         print(f"Diagnostic log saved: {diag_filepath}")
         return diag_filepath
+    
+    def save_performance_log(self):
+        """Save performance timing data to CSV file"""
+        has_data = any(len(self.performance_data[tid]['avg']) > 0 for tid in range(12))
+        if not has_data:
+            return
+        
+        dt = datetime.datetime.now()
+        time_string = dt.strftime("%H_%M_%S")
+        perf_filepath = os.path.join(os.path.dirname(self.raw_data_filepath), f"performance_{time_string}.csv")
+        
+        with open(perf_filepath, mode="w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["Timer ID", "Timer Name", "Avg (us)", "Max (us)", "Min (us)", "System Timestamp"])
+            
+            for timer_id in range(12):
+                if len(self.performance_data[timer_id]['avg']) > 0:
+                    timer_name = self.timer_names[timer_id]
+                    for i in range(len(self.performance_data[timer_id]['avg'])):
+                        writer.writerow([
+                            timer_id,
+                            timer_name,
+                            self.performance_data[timer_id]['avg'][i],
+                            self.performance_data[timer_id]['max'][i],
+                            self.performance_data[timer_id]['min'][i],
+                            self.performance_data[timer_id]['timestamps'][i]
+                        ])
+        
+        print(f"Performance log saved: {perf_filepath}")
+        return perf_filepath
 
     def cleanup(self):
         if os.path.exists(self.raw_data_filepath):
@@ -568,6 +745,7 @@ if __name__ == "__main__":
         # Print and save diagnostic information
         app.print_diagnostic_summary()
         app.save_diagnostic_log()
+        app.save_performance_log()
         
         # Create lookup tables
         app.create_lookup_table()

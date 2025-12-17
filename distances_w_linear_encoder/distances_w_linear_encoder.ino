@@ -207,6 +207,29 @@ void loop() {
           break;
         }
         
+        // Performance Timing Data
+        case 0x700: {
+          unsigned int timer_id = data[0];
+          unsigned long avg_us = ((unsigned long)data[1] << 8) | (unsigned long)data[2];
+          unsigned long max_us = ((unsigned long)data[3] << 8) | (unsigned long)data[4];
+          unsigned long min_us = ((unsigned long)data[5] << 8) | (unsigned long)data[6];
+          unsigned int count = data[7];
+
+          // Pack: timer_id(1), avg_us(2), max_us(2), min_us(2), count(1) = 8 bytes
+          uint8_t payloadP[8];
+          payloadP[0] = timer_id & 0xFF;
+          payloadP[1] = (avg_us >> 8) & 0xFF;
+          payloadP[2] = avg_us & 0xFF;
+          payloadP[3] = (max_us >> 8) & 0xFF;
+          payloadP[4] = max_us & 0xFF;
+          payloadP[5] = (min_us >> 8) & 0xFF;
+          payloadP[6] = min_us & 0xFF;
+          payloadP[7] = count & 0xFF;
+          // type 0xB0 = performance timing
+          sendFrame(0xB0, payloadP, 8);
+          break;
+        }
+        
         default:
           // Send unknown ID frame (type 0xAF) with 4-byte id payload
           {
