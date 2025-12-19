@@ -58,14 +58,28 @@ class SensorComparison:
         
         # Performance timing data
         self.timer_names = {
-            0: "TOTAL_FRAME",
-            1: "SENSOR_MEASURE",
-            2: "SENSOR_READ",
-            3: "PROCESSING_EXECUTE",
-            4: "CALIBRATION",
-            5: "THRESHOLD_ALGO",
-            6: "FIFO_AVERAGING",
-            7: "CAN_TRANSMIT",
+        # TIMER_SENSOR_MEASURE = 0,           // acc_sensor_measure()
+        # TIMER_SENSOR_READ,                  // acc_sensor_read()
+        # TIMER_PROCESSING_EXECUTE,           // acc_processing_execute()
+        # TIMER_CALIBRATION,                  // do_sensor_calibration_and_prepare()
+        # TIMER_THRESHOLD_ALGO,               // run_simple_threshold_algo()
+        # TIMER_FIFO_AVERAGING,               // FIFO averaging operations
+        # TIMER_CAN_TRANSMIT,                 // CAN transmission (both messages)
+        # TIMER_TOTAL_FRAME,                  // Entire frame processing
+        # TIMER_AMPLITUDE_CALC,               // Amplitude calculation loop
+        # TIMER_THRESHOLD_CHECK,              // Threshold checking
+        # TIMER_INTERPOLATION,                // Linear interpolation
+        # TIMER_LUT_LOOKUP,                   // Lookup table correction
+        
+        # TIMER_COUNT                         
+            0: "SENSOR_MEASURE",
+            1: "SENSOR_READ",
+            2: "PROCESSING_EXECUTE",
+            3: "CALIBRATION",
+            4: "THRESHOLD_ALGO",
+            5: "FIFO_AVERAGING",
+            6: "CAN_TRANSMIT",
+            7: "TOTAL_FRAME",
             8: "AMPLITUDE_CALC",
             9: "THRESHOLD_CHECK",
             10: "INTERPOLATION",
