@@ -4,13 +4,25 @@
 
 CANSAME5x CAN;
 
-// Define the pins connected to the quadrature encoder outputs
+// ===== CONFIGURATION =====
+// Choose position sensor type:
+// 0 = Linear Encoder (quadrature)
+// 1 = String Potentiometer (analog)
+#define POSITION_SENSOR_TYPE 0
+
+// String potentiometer configuration
+const int stringPotPin = A0;  // Analog input pin for string potentiometer
+const float ADC_RESOLUTION = 4095.0;  // 12-bit ADC (SAMD51)
+const float STRING_POT_MAX_VOLTAGE = 3.3;  // Reference voltage
+const float STRING_POT_MAX_DISTANCE = 1000.0;  // Maximum distance in mm (adjust as needed)
+
+// Linear encoder configuration
 const int encoderPinA = 15;  // Connect to the first output of encoder
 const int encoderPinB = 14;  // Connect to the second output of encoder
 
-volatile int encoderPos = 0;  // Variable to store encoder position
+volatile int encoderPos = 0;  // Variable to store encoder position (for linear encoder)
 
-// Function to handle interrupt from encoderPinA
+// Function to handle interrupt from encoderPinA (for linear encoder)
 void updateEncoder() {
   boolean apos = digitalRead(encoderPinA);  // MSB = most significant bit
   boolean bpos = digitalRead(encoderPinB);  // LSB = least significant bit
@@ -19,11 +31,32 @@ void updateEncoder() {
   if(bpos != apos) encoderPos++;
 }
 
+// Function to read string potentiometer position in mm
+float readStringPotPosition() {
+  int adcValue = analogRead(stringPotPin);
+  
+  // Convert ADC reading to voltage
+  float voltage = (adcValue / ADC_RESOLUTION) * STRING_POT_MAX_VOLTAGE;
+  
+  // Convert voltage to distance (linear mapping)
+  // Adjust this mapping based on your specific string potentiometer
+  float position = (voltage / STRING_POT_MAX_VOLTAGE) * STRING_POT_MAX_DISTANCE;
+  
+  return position;
+}
+
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
 
   Serial.println("CAN Receiver");
+  
+  // Print selected sensor type
+  if (POSITION_SENSOR_TYPE == 0) {
+    Serial.println("Position Sensor: Linear Encoder (Quadrature)");
+  } else {
+    Serial.println("Position Sensor: String Potentiometer (Analog A0)");
+  }
 
   pinMode(PIN_CAN_STANDBY, OUTPUT);
   digitalWrite(PIN_CAN_STANDBY, false); // turn off STANDBY
@@ -37,10 +70,18 @@ void setup() {
   }
   Serial.println("Starting CAN!");
 
-  pinMode(encoderPinA, INPUT_PULLUP);  // Set encoder pins as inputs
-  pinMode(encoderPinB, INPUT_PULLUP);
-  // Attach interrupt on a change of state on encoderPinA (to call updateEncoder function)
-  attachInterrupt(digitalPinToInterrupt(encoderPinA), updateEncoder, CHANGE);  
+  // Setup based on selected position sensor type
+  if (POSITION_SENSOR_TYPE == 0) {
+    // Linear encoder setup
+    pinMode(encoderPinA, INPUT_PULLUP);  // Set encoder pins as inputs
+    pinMode(encoderPinB, INPUT_PULLUP);
+    // Attach interrupt on a change of state on encoderPinA (to call updateEncoder function)
+    attachInterrupt(digitalPinToInterrupt(encoderPinA), updateEncoder, CHANGE);
+  } else {
+    // String potentiometer setup
+    pinMode(stringPotPin, INPUT);
+    analogReadResolution(12);  // Set ADC to 12-bit resolution (SAMD51 capability)
+  }
 }
 
 // Helper: send compact framed binary message over Serial
@@ -96,17 +137,27 @@ void loop() {
           unsigned long temp = ((unsigned long)data[6] << 8) |
                                 (unsigned long)data[7];
 
-          // Pack: distance (4), temp (2), encoderPos (4)
+          // Get position based on selected sensor type
+          long positionValue;
+          if (POSITION_SENSOR_TYPE == 0) {
+            // Linear encoder - use encoder position (counts)
+            positionValue = encoderPos;
+          } else {
+            // String potentiometer - convert mm to counts (*100 for two decimal places)
+            float stringPotPos = readStringPotPosition();
+            positionValue = (long)(stringPotPos * 100.0);
+          }
+
+          // Pack: distance (4), temp (2), positionValue (4)
           uint8_t payload[10];
           u32ToBytes(distance, payload);
           payload[4] = (temp >> 8) & 0xFF;
           payload[5] = temp & 0xFF;
-          // encoderPos as 32-bit
-          long ep = encoderPos;
-          payload[6] = (ep >> 24) & 0xFF;
-          payload[7] = (ep >> 16) & 0xFF;
-          payload[8] = (ep >> 8) & 0xFF;
-          payload[9] = ep & 0xFF;
+          // positionValue as 32-bit
+          payload[6] = (positionValue >> 24) & 0xFF;
+          payload[7] = (positionValue >> 16) & 0xFF;
+          payload[8] = (positionValue >> 8) & 0xFF;
+          payload[9] = positionValue & 0xFF;
           // type 0x10 = telemetry distance
           sendFrame(0x10, payload, 10);
           break;
