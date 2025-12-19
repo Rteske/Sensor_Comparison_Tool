@@ -19,7 +19,7 @@ class SensorComparison:
         # 0 = Linear Encoder -> use 'linear_encoder'
         # 1 = String Potentiometer -> use 'string_pot'
         self.position_sensor_type = 'linear_encoder'  # Change to 'string_pot' if using string potentiometer
-        self.position_sensor_type = 'string_pot'
+        # self.position_sensor_type = 'string_pot'
         
         dt = datetime.datetime.now()
         date_string = dt.strftime("%d_%m_%Y")
