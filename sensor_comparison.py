@@ -39,6 +39,8 @@ class SensorComparison:
         self.measurement_deltas = []
         self.distance_analog_values = []
         self.measurement_current_deltas = []
+        self.distance_outputs = []  # Distance output from A2 pin (STM32 current output)
+        self.stringpot_vs_distout_deltas = []  # Delta between string pot and distance output
         
         # Human-readable sensor name for display
         self.position_sensor_name = "Linear Encoder" if self.position_sensor_type == 'linear_encoder' else "String Potentiometer"
@@ -156,18 +158,24 @@ class SensorComparison:
             temp = float(temp_raw)
             if self.position_sensor_type == 'linear_encoder':
                 linec = float(encoder_raw) * 0.01
+                distance_output = 0.0
             else:
-                linec = float(encoder_raw) # Assuming string pot scaling
-
+                linec = float(encoder_raw) * 0.01  # Convert back from *100 scaling
+                distance_output = float(distance_output_raw) * 0.01  # Convert back from *100 scaling
 
             measurement_delta = abs(linec - distance)
+            distance_output_delta = abs(distance_output - distance)
+            stringpot_vs_distout_delta = abs(linec - distance_output)
+            
             self.sensor_distances.append(distance)
             self.sensor_timestamps.append(ts)
             self.linear_encoder_positions.append(linec)
             self.measurement_deltas.append(measurement_delta)
+            self.distance_outputs.append(distance_output)
+            self.stringpot_vs_distout_deltas.append(stringpot_vs_distout_delta)
 
-            print(f"Delta: {measurement_delta:.2f}mm, {self.position_sensor_name}: {linec:.2f}mm, Distance: {distance:.2f}mm")
-            self.write2file([distance, temp, linec, measurement_delta, ts])
+            print(f"Delta: {measurement_delta:.2f}mm, {self.position_sensor_name}: {linec:.2f}mm, Distance: {distance:.2f}mm, DistOut: {distance_output:.2f}mm (Δ{distance_output_delta:.2f}mm), StrPot-DistOut: {stringpot_vs_distout_delta:.2f}mm")
+            self.write2file([distance, temp, linec, measurement_delta, distance_output, distance_output_delta, stringpot_vs_distout_delta, ts])
 
         # Amplitude telemetry (type 0x11) - currently ignored but could be stored
         elif frame_type == 0x11 and payload and len(payload) >= 8:
@@ -257,6 +265,8 @@ class SensorComparison:
         plt.figure(figsize=(10, 5))
         plt.plot(relative_timestamps, self.sensor_distances, label="Sensor Distance", marker="o")
         plt.plot(relative_timestamps, self.linear_encoder_positions, label=self.position_sensor_name, marker="x")
+        if self.distance_outputs and any(d != 0 for d in self.distance_outputs):
+            plt.plot(relative_timestamps, self.distance_outputs, label="Distance Output (A2)", marker="s")
         plt.xlabel("Time (seconds)")
         plt.ylabel("Distance (MM)")
         plt.title(f"Distance vs Time ({self.position_sensor_name})")
@@ -271,6 +281,54 @@ class SensorComparison:
         plt.title(f"Delta vs {self.position_sensor_name}")
         plt.grid()
         plt.show()
+        
+        # Plot distance output vs sensor distance if available
+        if self.distance_outputs and any(d != 0 for d in self.distance_outputs):
+            plt.figure(figsize=(10, 5))
+            plt.scatter(self.sensor_distances, self.distance_outputs, label="Distance Output vs Sensor", color='b', marker=".")
+            # Add ideal line (y=x)
+            min_dist = min(min(self.sensor_distances), min(self.distance_outputs))
+            max_dist = max(max(self.sensor_distances), max(self.distance_outputs))
+            plt.plot([min_dist, max_dist], [min_dist, max_dist], 'g--', label="Ideal (y=x)")
+            plt.xlabel("Sensor Distance (MM)")
+            plt.ylabel("Distance Output A2 (MM)")
+            plt.title("Distance Output (A2) vs Sensor Distance")
+            plt.legend()
+            plt.grid()
+            plt.show()
+            
+            # Plot string pot vs distance output comparison
+            plt.figure(figsize=(10, 5))
+            plt.scatter(self.linear_encoder_positions, self.distance_outputs, label=f"{self.position_sensor_name} vs Distance Output", color='purple', marker=".")
+            # Add ideal line (y=x)
+            min_val = min(min(self.linear_encoder_positions), min(self.distance_outputs))
+            max_val = max(max(self.linear_encoder_positions), max(self.distance_outputs))
+            plt.plot([min_val, max_val], [min_val, max_val], 'g--', label="Ideal (y=x)")
+            plt.xlabel(f"{self.position_sensor_name} (MM)")
+            plt.ylabel("Distance Output A2 (MM)")
+            plt.title(f"{self.position_sensor_name} vs Distance Output (A2)")
+            plt.legend()
+            plt.grid()
+            plt.show()
+            
+            # Plot delta between string pot and distance output over time
+            plt.figure(figsize=(10, 5))
+            plt.plot(relative_timestamps, self.stringpot_vs_distout_deltas, label=f"{self.position_sensor_name} - Distance Output Delta", color='orange', marker=".")
+            plt.xlabel("Time (seconds)")
+            plt.ylabel("Delta (MM)")
+            plt.title(f"Delta Between {self.position_sensor_name} and Distance Output (A2) Over Time")
+            plt.legend()
+            plt.grid()
+            plt.show()
+            
+            # Plot delta vs position
+            plt.figure(figsize=(10, 5))
+            plt.scatter(self.linear_encoder_positions, self.stringpot_vs_distout_deltas, label="Delta", color='orange', marker=".")
+            plt.xlabel(f"{self.position_sensor_name} (MM)")
+            plt.ylabel(f"{self.position_sensor_name} - Distance Output Delta (MM)")
+            plt.title(f"Delta ({self.position_sensor_name} vs Distance Output) vs Position")
+            plt.grid()
+            plt.show()
         
         # Plot performance timing data
         self.plot_performance_timing()

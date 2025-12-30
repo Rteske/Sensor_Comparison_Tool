@@ -21,8 +21,8 @@ const float STRING_POT_START_VOLTAGE = 1.25; // Voltage at 0 mm (adjust as neede
 const int STRING_POT_SAMPLES = 10; // Number of samples to average
 
 // STM32 Current output
-const int distancePin = A2
-const float DISTANCE_START_VOLTAGE = 1.25
+const int distancePin = A2;
+const float DISTANCE_START_VOLTAGE = 1.25;
 
 // Linear encoder configuration
 const int encoderPinA = 15;  // Connect to the first output of encoder
@@ -204,11 +204,12 @@ void loop() {
           if (POSITION_SENSOR_TYPE == 0) {
             // Linear encoder - use encoder position (counts)
             positionValue = encoderPos;
+            distanceOutput = 0; // No distance output for linear encoder mode
           } else {
             // String potentiometer - convert mm to counts (*100 for two decimal places)
             float stringPotPos = readStringPotPosition();
-            distanceOutput = readDistanceOutput()
-            positionValue = (long)(stringPotPos);
+            distanceOutput = (long)(readDistanceOutput() * 100.0); // Convert to int with 2 decimal places
+            positionValue = (long)(stringPotPos * 100.0); // Convert to int with 2 decimal places
           }
 
           // Pack: distance (4), temp (2), positionValue (4), distanceOutput (4)
@@ -216,19 +217,19 @@ void loop() {
           u32ToBytes(distance, payload);
           payload[4] = (temp >> 8) & 0xFF;
           payload[5] = temp & 0xFF;
-          // positionValue as 32-bit
+          // positionValue as 32-bit (signed)
           payload[6] = (positionValue >> 24) & 0xFF;
           payload[7] = (positionValue >> 16) & 0xFF;
           payload[8] = (positionValue >> 8) & 0xFF;
           payload[9] = positionValue & 0xFF;
-          // distanceOutput
+          // distanceOutput as 32-bit (signed)
           payload[10] = (distanceOutput >> 24) & 0xFF;
           payload[11] = (distanceOutput >> 16) & 0xFF;
           payload[12] = (distanceOutput >> 8) & 0xFF;
           payload[13] = distanceOutput & 0xFF;
           
           // type 0x10 = telemetry distance
-          sendFrame(0x10, payload, 10);
+          sendFrame(0x10, payload, 14);
           break;
         }
         
