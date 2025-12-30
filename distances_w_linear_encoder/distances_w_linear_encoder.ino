@@ -8,13 +8,21 @@ CANSAME5x CAN;
 // Choose position sensor type:
 // 0 = Linear Encoder (quadrature)
 // 1 = String Potentiometer (analog)
-#define POSITION_SENSOR_TYPE 0
+#define POSITION_SENSOR_TYPE 1
 
 // String potentiometer configuration
+
+// OVERSAMPLING? FOR 16BIT
 const int stringPotPin = A0;  // Analog input pin for string potentiometer
-const float ADC_RESOLUTION = 4095.0;  // 12-bit ADC (SAMD51)
-const float STRING_POT_MAX_VOLTAGE = 3.3;  // Reference voltage
-const float STRING_POT_MAX_DISTANCE = 1000.0;  // Maximum distance in mm (adjust as needed)
+const float ADC_RES = 4095.0;  // 12-bit ADC (SAMD51)
+const float STRING_POT_MAX_VOLTAGE = 3.3;  // VDD MICROPROCCESSOR REFRENCE VOLTAGE
+const float STRING_POT_MAX_DISTANCE = 1500.0;  // Maximum distance in mm (adjust as needed)
+const float STRING_POT_START_VOLTAGE = 1.25; // Voltage at 0 mm (adjust as needed)
+const int STRING_POT_SAMPLES = 10; // Number of samples to average
+
+// STM32 Current output
+const int distancePin = A2
+const float DISTANCE_START_VOLTAGE = 1.25
 
 // Linear encoder configuration
 const int encoderPinA = 15;  // Connect to the first output of encoder
@@ -33,14 +41,42 @@ void updateEncoder() {
 
 // Function to read string potentiometer position in mm
 float readStringPotPosition() {
-  int adcValue = analogRead(stringPotPin);
+
+  int adcValue = 0;
+  for (int i = 0; i < STRING_POT_SAMPLES; i++) {
+    adcValue += analogRead(stringPotPin);
+    delay(1); // Small delay to allow ADC to settle
+  }
+  adcValue /= STRING_POT_SAMPLES;
   
   // Convert ADC reading to voltage
-  float voltage = (adcValue / ADC_RESOLUTION) * STRING_POT_MAX_VOLTAGE;
+  float voltage = (adcValue / ADC_RES) * STRING_POT_MAX_VOLTAGE;
   
   // Convert voltage to distance (linear mapping)
   // Adjust this mapping based on your specific string potentiometer
-  float position = (voltage / STRING_POT_MAX_VOLTAGE) * STRING_POT_MAX_DISTANCE;
+  // float position = (voltage / STRING_POT_MAX_VOLTAGE) * STRING_POT_MAX_DISTANCE;
+
+  float position = (voltage - STRING_POT_START_VOLTAGE) * 1000;
+  
+  return position;
+}
+
+float readDistanceOutput() {
+  int adcValue = 0;
+  for (int i = 0; i < STRING_POT_SAMPLES; i++) {
+    adcValue += analogRead(distancePin);
+    delay(1); // Small delay to allow ADC to settle
+  }
+  adcValue /= STRING_POT_SAMPLES;
+  
+  // Convert ADC reading to voltage
+  float voltage = (adcValue / ADC_RES) * STRING_POT_MAX_VOLTAGE;
+  
+  // Convert voltage to distance (linear mapping)
+  // Adjust this mapping based on your specific string potentiometer
+  // float position = (voltage / STRING_POT_MAX_VOLTAGE) * STRING_POT_MAX_DISTANCE;
+
+  float position = (voltage - DISTANCE_START_VOLTAGE) * 1000;
   
   return position;
 }
@@ -66,7 +102,7 @@ void setup() {
   // start the CAN bus at 250 kbps
   if (!CAN.begin(500000)) {
     Serial.println("Starting CAN failed!");
-    while (1) delay(10);
+    // while (1) delay(10);
   }
   Serial.println("Starting CAN!");
 
@@ -107,6 +143,31 @@ void u32ToBytes(unsigned long v, uint8_t* out) {
 }
 
 void loop() {
+  // TESTING FOR THE STRING POT
+  // long positionValue;
+  // if (POSITION_SENSOR_TYPE == 0) {
+  // // Linear encoder - use encoder position (counts)
+  // positionValue = encoderPos;
+  // } else {
+  // // String potentiometer - convert mm to counts (*100 for two decimal places)
+  // float stringPotPos = readStringPotPosition();
+  // positionValue = (long)(stringPotPos * 100.0);
+  // }
+  // uint32_t distance = 0;
+
+  // uint8_t payload[10];
+  // u32ToBytes(distance, payload);
+  // // payload[4] = (temp >> 8) & 0xFF;
+  // // payload[5] = temp & 0xFF;
+  // // positionValue as 32-bit
+  // payload[6] = (positionValue >> 24) & 0xFF;
+  // payload[7] = (positionValue >> 16) & 0xFF;
+  // payload[8] = (positionValue >> 8) & 0xFF;
+  // payload[9] = positionValue & 0xFF;
+  // // type 0x10 = telemetry distance
+  // sendFrame(0x10, payload, 10);
+
+
   int packetSize = CAN.parsePacket();
 
   if (packetSize) {
@@ -139,17 +200,19 @@ void loop() {
 
           // Get position based on selected sensor type
           long positionValue;
+          long distanceOutput;
           if (POSITION_SENSOR_TYPE == 0) {
             // Linear encoder - use encoder position (counts)
             positionValue = encoderPos;
           } else {
             // String potentiometer - convert mm to counts (*100 for two decimal places)
             float stringPotPos = readStringPotPosition();
-            positionValue = (long)(stringPotPos * 100.0);
+            distanceOutput = readDistanceOutput()
+            positionValue = (long)(stringPotPos);
           }
 
-          // Pack: distance (4), temp (2), positionValue (4)
-          uint8_t payload[10];
+          // Pack: distance (4), temp (2), positionValue (4), distanceOutput (4)
+          uint8_t payload[14];
           u32ToBytes(distance, payload);
           payload[4] = (temp >> 8) & 0xFF;
           payload[5] = temp & 0xFF;
@@ -158,6 +221,12 @@ void loop() {
           payload[7] = (positionValue >> 16) & 0xFF;
           payload[8] = (positionValue >> 8) & 0xFF;
           payload[9] = positionValue & 0xFF;
+          // distanceOutput
+          payload[10] = (distanceOutput >> 24) & 0xFF;
+          payload[11] = (distanceOutput >> 16) & 0xFF;
+          payload[12] = (distanceOutput >> 8) & 0xFF;
+          payload[13] = distanceOutput & 0xFF;
+          
           // type 0x10 = telemetry distance
           sendFrame(0x10, payload, 10);
           break;

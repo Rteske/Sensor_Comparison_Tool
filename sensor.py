@@ -4,7 +4,7 @@ import struct
 
 
 class Sensor:
-    def __init__(self, COM_PORT="COM5", baudrate=115200, timeout=0.2):
+    def __init__(self, COM_PORT="COM8", baudrate=115200, timeout=0.2):
         # Match Arduino Serial.begin(115200)
         self.ser = serial.Serial(COM_PORT, baudrate, timeout=timeout)
 

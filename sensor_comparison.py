@@ -18,8 +18,8 @@ class SensorComparison:
         # This should match the POSITION_SENSOR_TYPE setting in the Arduino code
         # 0 = Linear Encoder -> use 'linear_encoder'
         # 1 = String Potentiometer -> use 'string_pot'
-        self.position_sensor_type = 'linear_encoder'  # Change to 'string_pot' if using string potentiometer
-        # self.position_sensor_type = 'string_pot'
+        # self.position_sensor_type = 'linear_encoder'  # Change to 'string_pot' if using string potentiometer
+        self.position_sensor_type = 'string_pot'
         
         dt = datetime.datetime.now()
         date_string = dt.strftime("%d_%m_%Y")
@@ -37,6 +37,8 @@ class SensorComparison:
         self.sensor_timestamps = []
         self.linear_encoder_positions = []  # Generic position sensor data (encoder or string pot)
         self.measurement_deltas = []
+        self.distance_analog_values = []
+        self.measurement_current_deltas = []
         
         # Human-readable sensor name for display
         self.position_sensor_name = "Linear Encoder" if self.position_sensor_type == 'linear_encoder' else "String Potentiometer"
@@ -143,15 +145,20 @@ class SensorComparison:
             return
 
         ts = time.time()
-        # Telemetry distance frame (type 0x10): distance(4)|temp(2)|encoder(4)
-        if frame_type == 0x10 and payload and len(payload) >= 10:
+        # Telemetry distance frame (type 0x10): distance(4)|temp(2)|encoder(4)|distanceOutput(4)
+        if frame_type == 0x10 and payload and len(payload) >= 14:
             distance_raw = struct.unpack('>I', payload[0:4])[0]
             temp_raw = struct.unpack('>H', payload[4:6])[0]
             encoder_raw = int.from_bytes(payload[6:10], byteorder='big', signed=True)
+            distance_output_raw = int.from_bytes(payload[10:14], byteorder='big', signed=True)
 
             distance = distance_raw / 10.0
             temp = float(temp_raw)
-            linec = float(encoder_raw) * 0.01
+            if self.position_sensor_type == 'linear_encoder':
+                linec = float(encoder_raw) * 0.01
+            else:
+                linec = float(encoder_raw) # Assuming string pot scaling
+
 
             measurement_delta = abs(linec - distance)
             self.sensor_distances.append(distance)
@@ -653,7 +660,7 @@ class SensorComparison:
 if __name__ == "__main__":
     app = SensorComparison()
 
-    total_time = 35
+    total_time = 60
 
     t_start = time.time()
 
