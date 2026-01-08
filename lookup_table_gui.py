@@ -467,6 +467,38 @@ class LookupTableGUI:
         self.test_result_label = ttk.Label(test_frame, text="Result: -")
         self.test_result_label.pack(padx=5, pady=5)
         
+        # Lookup Table Correction Application
+        correction_frame = ttk.LabelFrame(self.test_frame, text="Apply Lookup Table Correction to TDS Data")
+        correction_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Load TDS file for correction
+        load_frame = ttk.Frame(correction_frame)
+        load_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(load_frame, text="Load TDS File...", command=self.load_tds_for_correction).pack(side=tk.LEFT)
+        self.tds_file_label = ttk.Label(load_frame, text="No file loaded")
+        self.tds_file_label.pack(side=tk.LEFT, padx=10)
+        
+        # LUT selection display
+        lut_frame = ttk.Frame(correction_frame)
+        lut_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(lut_frame, text="Active Lookup Table:").pack(side=tk.LEFT)
+        self.active_lut_label = ttk.Label(lut_frame, text="None selected", foreground="red")
+        self.active_lut_label.pack(side=tk.LEFT, padx=5)
+        
+        # Apply correction button
+        apply_frame = ttk.Frame(correction_frame)
+        apply_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(apply_frame, text="Apply LUT Correction", command=self.apply_lut_correction).pack(side=tk.LEFT)
+        ttk.Button(apply_frame, text="Save Corrected TDS...", command=self.save_corrected_tds).pack(side=tk.LEFT, padx=5)
+        ttk.Button(apply_frame, text="View Comparison Plot", command=self.show_correction_comparison).pack(side=tk.LEFT, padx=5)
+        
+        # Stats display
+        self.correction_stats_label = ttk.Label(correction_frame, text="", justify=tk.LEFT)
+        self.correction_stats_label.pack(padx=5, pady=5)
+        
         # Batch correction
         batch_frame = ttk.LabelFrame(self.test_frame, text="Batch Correction")
         batch_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -484,6 +516,8 @@ class LookupTableGUI:
         
         self.batch_data = None
         self.corrected_data = None
+        self.tds_data = None
+        self.corrected_tds_data = None
     
     def open_data_directory(self):
         """Open a data directory"""
@@ -696,6 +730,7 @@ class LookupTableGUI:
             name = self.lut_listbox.get(selection[0])
             self.current_lut = self.lookup_tables.get(name)
             self.update_compiled_display()
+            self.update_active_lut_label()
     
     def update_compiled_display(self):
         """Update the compiled LUT display"""
@@ -1060,6 +1095,287 @@ class LookupTableGUI:
                 messagebox.showinfo("Success", f"Saved: {filepath}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save: {str(e)}")
+    
+    def load_tds_for_correction(self):
+        """Load a TDS Excel file for applying correction factor"""
+        filepath = filedialog.askopenfilename(
+            title="Load TDS File",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+        )
+        if filepath:
+            try:
+                wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+                
+                # Try to find RAW_DATA sheet first, otherwise use active sheet
+                if 'RAW_DATA' in wb.sheetnames:
+                    ws = wb['RAW_DATA']
+                else:
+                    ws = wb.active
+                
+                self.tds_data = {
+                    'filepath': filepath,
+                    'distances': [],
+                    'temperatures': [],
+                    'positions': [],
+                    'deltas': []
+                }
+                
+                row_count = 0
+                for row in ws.iter_rows(min_row=1, values_only=True):
+                    if row and len(row) >= 4:
+                        try:
+                            # Excel format: distance, temp, position, delta, ...
+                            distance = float(row[0]) if row[0] is not None else None
+                            temp = float(row[1]) if row[1] is not None else None
+                            position = float(row[2]) if row[2] is not None else None
+                            delta = float(row[3]) if row[3] is not None else None
+                            
+                            if distance is not None and position is not None:
+                                self.tds_data['distances'].append(distance)
+                                self.tds_data['temperatures'].append(temp)
+                                self.tds_data['positions'].append(position)
+                                self.tds_data['deltas'].append(delta)
+                                row_count += 1
+                        except (ValueError, TypeError):
+                            continue
+                
+                wb.close()
+                
+                filename = os.path.basename(filepath)
+                self.tds_file_label.config(text=f"{filename} ({row_count} points)")
+                self.correction_stats_label.config(text="")
+                
+                messagebox.showinfo("Success", f"Loaded {row_count} data points from {filename}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load TDS file: {str(e)}")
+    
+    def update_active_lut_label(self):
+        """Update the active LUT label in the test tab"""
+        if self.current_lut and hasattr(self.current_lut, 'compiled_positions'):
+            self.active_lut_label.config(text=self.current_lut.name, foreground="green")
+        else:
+            self.active_lut_label.config(text="None selected", foreground="red")
+    
+    def apply_lut_correction(self):
+        """Apply lookup table correction to loaded TDS data"""
+        if not self.tds_data:
+            messagebox.showwarning("Warning", "No TDS file loaded")
+            return
+        
+        if not self.current_lut or not hasattr(self.current_lut, 'compiled_positions'):
+            messagebox.showwarning("Warning", "No lookup table selected. Please select a compiled lookup table first.")
+            return
+        
+        # Apply lookup table correction to distances
+        self.corrected_tds_data = {
+            'filepath': self.tds_data['filepath'],
+            'original_distances': self.tds_data['distances'].copy(),
+            'corrected_positions': [],
+            'temperatures': self.tds_data['temperatures'].copy(),
+            'positions': self.tds_data['positions'].copy(),
+            'deltas': self.tds_data['deltas'].copy(),
+            'lut_name': self.current_lut.name,
+            'out_of_range_count': 0
+        }
+        
+        # Use reverse_lookup to get true position for each sensor distance
+        for distance in self.tds_data['distances']:
+            true_position = self.current_lut.reverse_lookup(distance)
+            if true_position is not None:
+                self.corrected_tds_data['corrected_positions'].append(true_position)
+            else:
+                # Out of range - use original distance
+                self.corrected_tds_data['corrected_positions'].append(distance)
+                self.corrected_tds_data['out_of_range_count'] += 1
+        
+        # Calculate new deltas (corrected_position - reference_position)
+        self.corrected_tds_data['corrected_deltas'] = [
+            self.corrected_tds_data['corrected_positions'][i] - self.corrected_tds_data['positions'][i]
+            for i in range(len(self.corrected_tds_data['positions']))
+        ]
+        
+        # Calculate statistics
+        original_errors = [abs(d) for d in self.tds_data['deltas'] if d is not None]
+        corrected_errors = [abs(d) for d in self.corrected_tds_data['corrected_deltas']]
+        
+        # For mean, use absolute values
+        orig_mean = np.mean(original_errors) if original_errors else 0
+        orig_std = np.std(original_errors) if original_errors else 0
+        
+        corr_mean = np.mean(corrected_errors) if corrected_errors else 0
+        corr_std = np.std(corrected_errors) if corrected_errors else 0
+        
+        # For min/max, use raw deltas to show actual range (including negative)
+        orig_deltas_list = [d for d in self.tds_data['deltas'] if d is not None]
+        corr_deltas_list = self.corrected_tds_data['corrected_deltas']
+        
+        orig_min = min(orig_deltas_list) if orig_deltas_list else 0
+        orig_max = max(orig_deltas_list) if orig_deltas_list else 0
+        corr_min = min(corr_deltas_list) if corr_deltas_list else 0
+        corr_max = max(corr_deltas_list) if corr_deltas_list else 0
+        
+        improvement = ((orig_mean - corr_mean) / orig_mean * 100) if orig_mean > 0 else 0
+        
+        stats_text = (
+            f"Lookup Table: {self.current_lut.name}\n"
+            f"Data Points: {len(self.corrected_tds_data['positions'])}\n"
+            f"Out of Range: {self.corrected_tds_data['out_of_range_count']}\n\n"
+            f"Original Error:\n"
+            f"  Mean: {orig_mean:.3f}mm, Std: {orig_std:.3f}mm\n"
+            f"  Min: {orig_min:.3f}mm, Max: {orig_max:.3f}mm\n\n"
+            f"Corrected Error:\n"
+            f"  Mean: {corr_mean:.3f}mm, Std: {corr_std:.3f}mm\n"
+            f"  Min: {corr_min:.3f}mm, Max: {corr_max:.3f}mm\n\n"
+            f"Improvement: {improvement:.1f}%"
+        )
+        self.correction_stats_label.config(text=stats_text)
+        
+        messagebox.showinfo("Success", 
+            f"Applied LUT correction: {self.current_lut.name}\n\n"
+            f"Mean error: {orig_mean:.3f}mm → {corr_mean:.3f}mm\n"
+            f"Min/Max: {orig_min:.3f}/{orig_max:.3f}mm → {corr_min:.3f}/{corr_max:.3f}mm\n"
+            f"Improvement: {improvement:.1f}%\n\n"
+            f"{self.corrected_tds_data['out_of_range_count']} points out of LUT range")
+    
+    def save_corrected_tds(self):
+        """Save corrected TDS data to Excel file"""
+        if not self.corrected_tds_data:
+            messagebox.showwarning("Warning", "No corrected TDS data to save")
+            return
+        
+        original_name = os.path.basename(self.corrected_tds_data['filepath'])
+        base_name = os.path.splitext(original_name)[0]
+        lut_name = self.corrected_tds_data.get('lut_name', 'LUT').replace(' ', '_')
+        default_name = f"{base_name}_corrected_{lut_name}.xlsx"
+        
+        filepath = filedialog.asksaveasfilename(
+            title="Save Corrected TDS Data",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+        )
+        if filepath:
+            try:
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "RAW_DATA"
+                
+                # Write header
+                ws.append([
+                    'Reference Position (mm)', 
+                    'Original Sensor Distance (mm)',
+                    'LUT Corrected Position (mm)', 
+                    'Temperature (C)', 
+                    'Original Error (mm)',
+                    'Corrected Error (mm)'
+                ])
+                
+                # Write data
+                for i in range(len(self.corrected_tds_data['positions'])):
+                    ws.append([
+                        self.corrected_tds_data['positions'][i],
+                        self.corrected_tds_data['original_distances'][i],
+                        self.corrected_tds_data['corrected_positions'][i],
+                        self.corrected_tds_data['temperatures'][i],
+                        self.corrected_tds_data['deltas'][i],
+                        self.corrected_tds_data['corrected_deltas'][i]
+                    ])
+                
+                # Add metadata sheet
+                meta_ws = wb.create_sheet("METADATA")
+                meta_ws.append(['Lookup Table', self.corrected_tds_data.get('lut_name', 'N/A')])
+                meta_ws.append(['Original File', os.path.basename(self.corrected_tds_data['filepath'])])
+                meta_ws.append(['Corrected Date', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+                meta_ws.append(['Data Points', len(self.corrected_tds_data['positions'])])
+                meta_ws.append(['Out of Range Points', self.corrected_tds_data.get('out_of_range_count', 0)])
+                
+                wb.save(filepath)
+                messagebox.showinfo("Success", f"Saved corrected data to:\n{filepath}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save: {str(e)}")
+    
+    def show_correction_comparison(self):
+        """Show comparison plot of original vs corrected data"""
+        if not self.corrected_tds_data:
+            messagebox.showwarning("Warning", "No corrected data available. Apply correction factor first.")
+            return
+        
+        # Create comparison plot window
+        plot_window = tk.Toplevel(self.root)
+        plot_window.title("Correction Factor Comparison")
+        plot_window.geometry("1000x700")
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        positions = self.corrected_tds_data['positions']
+        orig_distances = self.corrected_tds_data['original_distances']
+        corr_positions = self.corrected_tds_data['corrected_positions']
+        orig_deltas = self.corrected_tds_data['deltas']
+        corr_deltas = self.corrected_tds_data['corrected_deltas']
+        
+        # Calculate error statistics
+        orig_abs_errors = [abs(d) for d in orig_deltas]
+        corr_abs_errors = [abs(d) for d in corr_deltas]
+        
+        orig_mean = np.mean(orig_abs_errors)
+        orig_min = min(orig_deltas)  # Use raw deltas for min/max to show actual range
+        orig_max = max(orig_deltas)
+        
+        corr_mean = np.mean(corr_abs_errors)
+        corr_min = min(corr_deltas)  # Use raw deltas for min/max to show actual range
+        corr_max = max(corr_deltas)
+        
+        # Plot 1: Original Sensor Distance vs Reference Position
+        ax1 = axes[0, 0]
+        ax1.scatter(positions, orig_distances, alpha=0.5, s=10, label='Sensor Reading')
+        min_val = min(min(positions), min(orig_distances))
+        max_val = max(max(positions), max(orig_distances))
+        ax1.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.7, label='Ideal (y=x)')
+        ax1.set_xlabel('Reference Position (mm)')
+        ax1.set_ylabel('Sensor Distance (mm)')
+        ax1.set_title('Original Sensor Data')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        # Plot 2: Corrected Position vs Reference Position
+        ax2 = axes[0, 1]
+        ax2.scatter(positions, corr_positions, alpha=0.5, s=10, color='green', label='LUT Corrected')
+        min_val = min(min(positions), min(corr_positions))
+        max_val = max(max(positions), max(corr_positions))
+        ax2.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.7, label='Ideal (y=x)')
+        ax2.set_xlabel('Reference Position (mm)')
+        ax2.set_ylabel('Corrected Position (mm)')
+        ax2.set_title(f'LUT Corrected Data ({self.corrected_tds_data.get("lut_name", "N/A")})')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        
+        # Plot 3: Original Error vs Position
+        ax3 = axes[1, 0]
+        ax3.scatter(positions, orig_deltas, alpha=0.5, s=10, color='orange')
+        ax3.axhline(y=0, color='r', linestyle='--', alpha=0.7)
+        ax3.set_xlabel('Position (mm)')
+        ax3.set_ylabel('Error (mm)')
+        ax3.set_title(f'Original Error\nMean: {orig_mean:.3f}mm | Min: {orig_min:.3f}mm | Max: {orig_max:.3f}mm')
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Corrected Error vs Position
+        ax4 = axes[1, 1]
+        ax4.scatter(positions, corr_deltas, alpha=0.5, s=10, color='green')
+        ax4.axhline(y=0, color='r', linestyle='--', alpha=0.7)
+        ax4.set_xlabel('Position (mm)')
+        ax4.set_ylabel('Error (mm)')
+        ax4.set_title(f'Corrected Error\nMean: {corr_mean:.3f}mm | Min: {corr_min:.3f}mm | Max: {corr_max:.3f}mm')
+        ax4.grid(True, alpha=0.3)
+        
+        fig.tight_layout()
+        
+        canvas = FigureCanvasTkAgg(fig, plot_window)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        toolbar_frame = ttk.Frame(plot_window)
+        toolbar_frame.pack(fill=tk.X)
+        NavigationToolbar2Tk(canvas, toolbar_frame)
 
 
 def main():
