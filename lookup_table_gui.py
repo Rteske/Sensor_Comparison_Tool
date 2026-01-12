@@ -31,13 +31,16 @@ class LookupTable:
         self.positions.extend(positions)
         self.distances.extend(distances)
     
-    def compile(self, bin_size=1.0, method='average'):
+    def compile(self, bin_size=1.0, method='average', smooth=False, smooth_method='moving_average', smooth_window=5):
         """
         Compile the lookup table by binning and averaging data points.
         
         Args:
             bin_size: Size of position bins in mm
             method: 'average', 'median', or 'linear_fit'
+            smooth: Whether to apply smoothing to the compiled data
+            smooth_method: 'moving_average', 'savgol', or 'gaussian'
+            smooth_window: Window size for smoothing (must be odd for savgol)
         """
         if not self.positions or not self.distances:
             return False
@@ -77,7 +80,75 @@ class LookupTable:
         self.metadata['method'] = method
         self.metadata['compiled_date'] = datetime.datetime.now().isoformat()
         
+        # Apply smoothing if requested
+        if smooth and len(self.compiled_distances) > smooth_window:
+            self.apply_smoothing(smooth_method, smooth_window)
+            self.metadata['smoothed'] = True
+            self.metadata['smooth_method'] = smooth_method
+            self.metadata['smooth_window'] = smooth_window
+        else:
+            self.metadata['smoothed'] = False
+        
         return True
+    
+    def apply_smoothing(self, method='moving_average', window=5):
+        """
+        Apply smoothing to the compiled lookup table data.
+        
+        Args:
+            method: 'moving_average', 'savgol', or 'gaussian'
+            window: Window size for smoothing
+        """
+        if method == 'moving_average':
+            self._smooth_moving_average(window)
+        elif method == 'savgol':
+            self._smooth_savgol(window)
+        elif method == 'gaussian':
+            self._smooth_gaussian(window)
+    
+    def _smooth_moving_average(self, window):
+        """Apply moving average smoothing"""
+        if window < 2:
+            return
+        
+        smoothed = []
+        half_window = window // 2
+        
+        for i in range(len(self.compiled_distances)):
+            start_idx = max(0, i - half_window)
+            end_idx = min(len(self.compiled_distances), i + half_window + 1)
+            window_values = self.compiled_distances[start_idx:end_idx]
+            smoothed.append(np.mean(window_values))
+        
+        self.compiled_distances = smoothed
+    
+    def _smooth_savgol(self, window):
+        """Apply Savitzky-Golay filter smoothing"""
+        try:
+            from scipy.signal import savgol_filter
+            # Ensure window is odd and less than data length
+            if window % 2 == 0:
+                window += 1
+            window = min(window, len(self.compiled_distances))
+            if window < 3:
+                return
+            
+            # Use polynomial order 2 (or window-1 if window is small)
+            polyorder = min(2, window - 1)
+            self.compiled_distances = savgol_filter(self.compiled_distances, window, polyorder).tolist()
+        except ImportError:
+            # Fallback to moving average if scipy not available
+            self._smooth_moving_average(window)
+    
+    def _smooth_gaussian(self, window):
+        """Apply Gaussian smoothing"""
+        from scipy.ndimage import gaussian_filter1d
+        try:
+            sigma = window / 3.0  # Standard deviation
+            self.compiled_distances = gaussian_filter1d(self.compiled_distances, sigma).tolist()
+        except ImportError:
+            # Fallback to moving average if scipy not available
+            self._smooth_moving_average(window)
     
     def lookup(self, position):
         """
@@ -145,6 +216,202 @@ class LookupTable:
         if true_position is not None:
             return true_position - sensor_distance
         return 0
+    
+    def get_interpolated_offset(self, sensor_distance):
+        """
+        Get interpolated offset by directly interpolating the error curve.
+        This builds an error lookup table and interpolates it.
+        """
+        if not hasattr(self, 'compiled_positions') or not self.compiled_positions:
+            return 0
+        
+        # Build error curve: error = distance - position
+        errors = [self.compiled_distances[i] - self.compiled_positions[i] 
+                  for i in range(len(self.compiled_positions))]
+        distances = self.compiled_distances
+        
+        # Handle edge cases
+        if sensor_distance <= min(distances):
+            idx = distances.index(min(distances))
+            return errors[idx]
+        if sensor_distance >= max(distances):
+            idx = distances.index(max(distances))
+            return errors[idx]
+        
+        # Linear interpolation in error space
+        for i in range(len(distances) - 1):
+            d1, d2 = distances[i], distances[i + 1]
+            if (d1 <= sensor_distance <= d2) or (d2 <= sensor_distance <= d1):
+                e1, e2 = errors[i], errors[i + 1]
+                if d2 != d1:
+                    interpolated_error = e1 + (e2 - e1) * (sensor_distance - d1) / (d2 - d1)
+                    return interpolated_error
+        
+        return 0
+    
+    def _apply_spline_correction(self, sensor_distance):
+        """
+        Apply correction using cubic spline interpolation.
+        Provides smoother interpolation than linear.
+        """
+        if not hasattr(self, 'compiled_positions') or not self.compiled_positions:
+            return None
+        
+        try:
+            from scipy.interpolate import CubicSpline
+            
+            distances = self.compiled_distances
+            positions = self.compiled_positions
+            
+            # Handle edge cases
+            if sensor_distance < min(distances) or sensor_distance > max(distances):
+                # Fall back to reverse lookup for out of range
+                return self.reverse_lookup(sensor_distance)
+            
+            # Create cubic spline (distance -> position)
+            cs = CubicSpline(distances, positions)
+            return float(cs(sensor_distance))
+            
+        except ImportError:
+            # Fall back to reverse lookup if scipy not available
+            return self.reverse_lookup(sensor_distance)
+    
+    def _apply_polynomial_correction(self, sensor_distance, degree=3):
+        """
+        Apply correction using polynomial fit to the error curve.
+        """
+        if not hasattr(self, 'compiled_positions') or not self.compiled_positions:
+            return None
+        
+        # Build error curve
+        errors = [self.compiled_distances[i] - self.compiled_positions[i] 
+                  for i in range(len(self.compiled_positions))]
+        distances = self.compiled_distances
+        
+        # Fit polynomial to error vs distance
+        degree = min(degree, len(distances) - 1)  # Can't exceed data points - 1
+        coeffs = np.polyfit(distances, errors, degree)
+        
+        # Evaluate polynomial at sensor_distance
+        error = np.polyval(coeffs, sensor_distance)
+        
+        # Corrected position = sensor_distance - error
+        return sensor_distance - error
+    
+    def _apply_nearest_neighbor(self, sensor_distance):
+        """
+        Apply correction using nearest neighbor (no interpolation).
+        Simply finds the closest LUT entry.
+        """
+        if not hasattr(self, 'compiled_positions') or not self.compiled_positions:
+            return None
+        
+        distances = self.compiled_distances
+        positions = self.compiled_positions
+        
+        # Find nearest distance
+        min_diff = float('inf')
+        nearest_idx = 0
+        
+        for i, dist in enumerate(distances):
+            diff = abs(dist - sensor_distance)
+            if diff < min_diff:
+                min_diff = diff
+                nearest_idx = i
+        
+        return positions[nearest_idx]
+    
+    def _apply_weighted_average(self, sensor_distance, k=3, power=1.0):
+        """
+        Apply correction using weighted average of k nearest neighbors.
+        Weights are based on inverse distance raised to a power.
+        
+        Args:
+            sensor_distance: Raw sensor reading
+            k: Number of nearest neighbors to use
+            power: Power for inverse distance weighting (higher = more weight to closer points)
+        """
+        if not hasattr(self, 'compiled_positions') or not self.compiled_positions:
+            return None
+        
+        distances = self.compiled_distances
+        positions = self.compiled_positions
+        
+        # Calculate distances to all LUT points
+        diffs = [(abs(dist - sensor_distance), i) for i, dist in enumerate(distances)]
+        diffs.sort()  # Sort by distance
+        
+        # Take k nearest neighbors
+        k = min(k, len(diffs))
+        nearest = diffs[:k]
+        
+        # If exact match, return it
+        if nearest[0][0] < 1e-6:
+            return positions[nearest[0][1]]
+        
+        # Weighted average using inverse distance with power
+        total_weight = 0
+        weighted_sum = 0
+        
+        for diff, idx in nearest:
+            weight = 1.0 / ((diff + 1e-6) ** power)  # Power parameter for weighting
+            weighted_sum += positions[idx] * weight
+            total_weight += weight
+        
+        return weighted_sum / total_weight if total_weight > 0 else positions[nearest[0][1]]
+    
+    def apply_correction(self, sensor_distance, method='reverse_lookup', **kwargs):
+        """
+        Apply correction to a sensor distance reading using specified method.
+        
+        Args:
+            sensor_distance: Raw sensor reading in mm
+            method: Correction method to use:
+                - 'reverse_lookup': Find true position by reverse lookup (default, linear)
+                - 'error_subtraction': Calculate and subtract interpolated error (linear)
+                - 'spline': Cubic spline interpolation (smooth, requires scipy)
+                - 'polynomial': Polynomial fit to error curve (smooth, degree 3)
+                - 'nearest': Nearest neighbor (no interpolation, simple)
+                - 'weighted': Weighted average of k nearest neighbors (smooth)
+            **kwargs: Method-specific parameters:
+                - degree: Polynomial degree (for 'polynomial', default=3)
+                - k: Number of neighbors (for 'weighted', default=3)
+                - power: Distance weighting power (for 'weighted', default=1.0)
+        
+        Returns:
+            Corrected position in mm
+        """
+        if method == 'reverse_lookup':
+            # Use reverse lookup to find true position
+            return self.reverse_lookup(sensor_distance)
+        
+        elif method in ['error_subtraction', 'offset_correction']:
+            # Calculate interpolated error and subtract from reading
+            offset = self.get_interpolated_offset(sensor_distance)
+            return sensor_distance - offset
+        
+        elif method == 'spline':
+            # Cubic spline interpolation
+            return self._apply_spline_correction(sensor_distance)
+        
+        elif method == 'polynomial':
+            # Polynomial fit to error curve
+            degree = kwargs.get('degree', 3)
+            return self._apply_polynomial_correction(sensor_distance, degree=degree)
+        
+        elif method == 'nearest':
+            # Nearest neighbor (no interpolation)
+            return self._apply_nearest_neighbor(sensor_distance)
+        
+        elif method == 'weighted':
+            # Weighted average of k nearest neighbors
+            k = kwargs.get('k', 3)
+            power = kwargs.get('power', 1.0)
+            return self._apply_weighted_average(sensor_distance, k=k, power=power)
+        
+        else:
+            # Default to reverse lookup
+            return self.reverse_lookup(sensor_distance)
     
     def to_dict(self):
         """Convert lookup table to dictionary for saving"""
@@ -346,6 +613,11 @@ class LookupTableGUI:
         self.test_frame = ttk.Frame(self.right_notebook)
         self.right_notebook.add(self.test_frame, text="Test & Apply")
         self.setup_test_tab()
+        
+        # Tab 4: Auto-Optimize
+        self.optimize_frame = ttk.Frame(self.right_notebook)
+        self.right_notebook.add(self.optimize_frame, text="Auto-Optimize")
+        self.setup_optimize_tab()
     
     def setup_pending_tab(self):
         """Setup the pending data tab"""
@@ -388,6 +660,32 @@ class LookupTableGUI:
         ttk.Label(name_frame, text="LUT Name:").pack(side=tk.LEFT)
         self.lut_name_var = tk.StringVar(value="New_LUT")
         ttk.Entry(name_frame, textvariable=self.lut_name_var, width=20).pack(side=tk.LEFT, padx=5)
+        
+        # Smoothing options
+        smooth_label_frame = ttk.LabelFrame(options_frame, text="Smoothing (Optional)")
+        smooth_label_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Enable smoothing checkbox
+        self.smooth_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(smooth_label_frame, text="Enable Smoothing", 
+                       variable=self.smooth_enabled_var).pack(anchor=tk.W, padx=5, pady=2)
+        
+        # Smoothing method
+        smooth_method_frame = ttk.Frame(smooth_label_frame)
+        smooth_method_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(smooth_method_frame, text="Method:").pack(side=tk.LEFT)
+        self.smooth_method_var = tk.StringVar(value="moving_average")
+        ttk.Combobox(smooth_method_frame, textvariable=self.smooth_method_var, 
+                     values=["moving_average", "savgol", "gaussian"], 
+                     state="readonly", width=15).pack(side=tk.LEFT, padx=5)
+        
+        # Smoothing window
+        smooth_window_frame = ttk.Frame(smooth_label_frame)
+        smooth_window_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(smooth_window_frame, text="Window Size:").pack(side=tk.LEFT)
+        self.smooth_window_var = tk.StringVar(value="5")
+        ttk.Entry(smooth_window_frame, textvariable=self.smooth_window_var, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Label(smooth_window_frame, text="(larger = smoother)").pack(side=tk.LEFT)
         
         # Compile button
         ttk.Button(options_frame, text="Compile Lookup Table", 
@@ -487,6 +785,110 @@ class LookupTableGUI:
         self.active_lut_label = ttk.Label(lut_frame, text="None selected", foreground="red")
         self.active_lut_label.pack(side=tk.LEFT, padx=5)
         
+        # Correction method selection
+        method_frame = ttk.LabelFrame(correction_frame, text="Correction Method")
+        method_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.correction_method_var = tk.StringVar(value="reverse_lookup")
+        
+        # Create scrollable frame for methods
+        method_canvas = tk.Canvas(method_frame, height=180)
+        method_scrollbar = ttk.Scrollbar(method_frame, orient="vertical", command=method_canvas.yview)
+        method_inner_frame = ttk.Frame(method_canvas)
+        
+        method_inner_frame.bind(
+            "<Configure>",
+            lambda e: method_canvas.configure(scrollregion=method_canvas.bbox("all"))
+        )
+        
+        method_canvas.create_window((0, 0), window=method_inner_frame, anchor="nw")
+        method_canvas.configure(yscrollcommand=method_scrollbar.set)
+        
+        # Linear methods
+        ttk.Label(method_inner_frame, text="Linear Methods:", font=('TkDefaultFont', 9, 'bold')).pack(anchor=tk.W, padx=5, pady=(2,0))
+        
+        ttk.Radiobutton(method_inner_frame, text="Reverse Lookup (Linear)", 
+                       variable=self.correction_method_var, 
+                       value="reverse_lookup").pack(anchor=tk.W, padx=5, pady=1)
+        ttk.Label(method_inner_frame, text="   Fast, linear interpolation between LUT points",
+                 font=('TkDefaultFont', 8), foreground='gray').pack(anchor=tk.W, padx=20)
+        
+        ttk.Radiobutton(method_inner_frame, text="Error Subtraction (Linear)", 
+                       variable=self.correction_method_var, 
+                       value="error_subtraction").pack(anchor=tk.W, padx=5, pady=1)
+        ttk.Label(method_inner_frame, text="   Interpolates error curve, linear between points",
+                 font=('TkDefaultFont', 8), foreground='gray').pack(anchor=tk.W, padx=20)
+        
+        # Smooth methods
+        ttk.Label(method_inner_frame, text="\nSmooth Methods:", font=('TkDefaultFont', 9, 'bold')).pack(anchor=tk.W, padx=5, pady=(5,0))
+        
+        ttk.Radiobutton(method_inner_frame, text="Cubic Spline", 
+                       variable=self.correction_method_var, 
+                       value="spline").pack(anchor=tk.W, padx=5, pady=1)
+        ttk.Label(method_inner_frame, text="   Smooth curves, continuous derivatives (requires scipy)",
+                 font=('TkDefaultFont', 8), foreground='gray').pack(anchor=tk.W, padx=20)
+        
+        ttk.Radiobutton(method_inner_frame, text="Polynomial Fit (degree 3)", 
+                       variable=self.correction_method_var, 
+                       value="polynomial").pack(anchor=tk.W, padx=5, pady=1)
+        ttk.Label(method_inner_frame, text="   Fits polynomial to error curve, very smooth",
+                 font=('TkDefaultFont', 8), foreground='gray').pack(anchor=tk.W, padx=20)
+        
+        ttk.Radiobutton(method_inner_frame, text="Weighted Average (k=3)", 
+                       variable=self.correction_method_var, 
+                       value="weighted").pack(anchor=tk.W, padx=5, pady=1)
+        ttk.Label(method_inner_frame, text="   Uses 3 nearest points with distance weighting",
+                 font=('TkDefaultFont', 8), foreground='gray').pack(anchor=tk.W, padx=20)
+        
+        # Simple methods
+        ttk.Label(method_inner_frame, text="\nSimple Methods:", font=('TkDefaultFont', 9, 'bold')).pack(anchor=tk.W, padx=5, pady=(5,0))
+        
+        ttk.Radiobutton(method_inner_frame, text="Nearest Neighbor", 
+                       variable=self.correction_method_var, 
+                       value="nearest").pack(anchor=tk.W, padx=5, pady=1)
+        ttk.Label(method_inner_frame, text="   Uses closest LUT point, no interpolation",
+                 font=('TkDefaultFont', 8), foreground='gray').pack(anchor=tk.W, padx=20)
+        
+        method_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        method_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        ttk.Button(method_frame, text="Compare All Methods...", 
+                  command=self.compare_correction_methods).pack(pady=5)
+        
+        # Method Parameters
+        params_frame = ttk.LabelFrame(correction_frame, text="Method Parameters")
+        params_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Polynomial degree
+        poly_frame = ttk.Frame(params_frame)
+        poly_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(poly_frame, text="Polynomial Degree:").pack(side=tk.LEFT)
+        self.poly_degree_var = tk.StringVar(value="3")
+        poly_spinbox = ttk.Spinbox(poly_frame, from_=1, to=10, textvariable=self.poly_degree_var, width=8)
+        poly_spinbox.pack(side=tk.LEFT, padx=5)
+        ttk.Label(poly_frame, text="(for Polynomial method)", 
+                 font=('TkDefaultFont', 8), foreground='gray').pack(side=tk.LEFT)
+        
+        # Weighted k neighbors
+        k_frame = ttk.Frame(params_frame)
+        k_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(k_frame, text="K Neighbors:").pack(side=tk.LEFT)
+        self.k_neighbors_var = tk.StringVar(value="3")
+        k_spinbox = ttk.Spinbox(k_frame, from_=1, to=20, textvariable=self.k_neighbors_var, width=8)
+        k_spinbox.pack(side=tk.LEFT, padx=5)
+        ttk.Label(k_frame, text="(for Weighted Average method)", 
+                 font=('TkDefaultFont', 8), foreground='gray').pack(side=tk.LEFT)
+        
+        # Weighted power
+        power_frame = ttk.Frame(params_frame)
+        power_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(power_frame, text="Distance Power:").pack(side=tk.LEFT)
+        self.distance_power_var = tk.StringVar(value="1.0")
+        power_entry = ttk.Entry(power_frame, textvariable=self.distance_power_var, width=8)
+        power_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(power_frame, text="(1.0=linear, 2.0=quadratic, for Weighted)", 
+                 font=('TkDefaultFont', 8), foreground='gray').pack(side=tk.LEFT)
+        
         # Apply correction button
         apply_frame = ttk.Frame(correction_frame)
         apply_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -518,6 +920,98 @@ class LookupTableGUI:
         self.corrected_data = None
         self.tds_data = None
         self.corrected_tds_data = None
+        self.optimization_results = None
+    
+    def setup_optimize_tab(self):
+        """Setup the auto-optimization tab"""
+        # Info frame
+        info_frame = ttk.LabelFrame(self.optimize_frame, text="Auto-Optimization")
+        info_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        info_text = (
+            "This tool tests all correction methods with various parameter combinations\n"
+            "to find the best possible improvement for your data.\n\n"
+            "You must have TDS data loaded in the 'Test & Apply' tab first."
+        )
+        ttk.Label(info_frame, text=info_text, justify=tk.LEFT).pack(padx=5, pady=5)
+        
+        # Configuration frame
+        config_frame = ttk.LabelFrame(self.optimize_frame, text="Search Configuration")
+        config_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Polynomial degree range
+        poly_range_frame = ttk.Frame(config_frame)
+        poly_range_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(poly_range_frame, text="Polynomial Degrees:").pack(side=tk.LEFT)
+        self.opt_poly_min_var = tk.StringVar(value="1")
+        ttk.Spinbox(poly_range_frame, from_=1, to=10, textvariable=self.opt_poly_min_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Label(poly_range_frame, text="to").pack(side=tk.LEFT)
+        self.opt_poly_max_var = tk.StringVar(value="5")
+        ttk.Spinbox(poly_range_frame, from_=1, to=10, textvariable=self.opt_poly_max_var, width=5).pack(side=tk.LEFT, padx=2)
+        
+        # K neighbors range
+        k_range_frame = ttk.Frame(config_frame)
+        k_range_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(k_range_frame, text="K Neighbors:").pack(side=tk.LEFT)
+        self.opt_k_min_var = tk.StringVar(value="1")
+        ttk.Spinbox(k_range_frame, from_=1, to=20, textvariable=self.opt_k_min_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Label(k_range_frame, text="to").pack(side=tk.LEFT)
+        self.opt_k_max_var = tk.StringVar(value="7")
+        ttk.Spinbox(k_range_frame, from_=1, to=20, textvariable=self.opt_k_max_var, width=5).pack(side=tk.LEFT, padx=2)
+        
+        # Distance power range
+        power_range_frame = ttk.Frame(config_frame)
+        power_range_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(power_range_frame, text="Distance Powers:").pack(side=tk.LEFT)
+        self.opt_power_values_var = tk.StringVar(value="0.5, 1.0, 1.5, 2.0")
+        ttk.Entry(power_range_frame, textvariable=self.opt_power_values_var, width=30).pack(side=tk.LEFT, padx=5)
+        ttk.Label(power_range_frame, text="(comma-separated)", font=('TkDefaultFont', 8), foreground='gray').pack(side=tk.LEFT)
+        
+        # Run button
+        btn_frame = ttk.Frame(config_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=10)
+        ttk.Button(btn_frame, text="Run Optimization", command=self.run_optimization).pack(side=tk.LEFT, padx=5)
+        self.opt_progress_label = ttk.Label(btn_frame, text="")
+        self.opt_progress_label.pack(side=tk.LEFT, padx=10)
+        
+        # Results frame
+        results_frame = ttk.LabelFrame(self.optimize_frame, text="Optimization Results")
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Results table
+        table_frame = ttk.Frame(results_frame)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        columns = ('rank', 'method', 'parameters', 'mean_error', 'improvement', 'std_error')
+        self.opt_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
+        
+        self.opt_tree.heading('rank', text='Rank')
+        self.opt_tree.heading('method', text='Method')
+        self.opt_tree.heading('parameters', text='Parameters')
+        self.opt_tree.heading('mean_error', text='Mean Error (mm)')
+        self.opt_tree.heading('improvement', text='Improvement (%)')
+        self.opt_tree.heading('std_error', text='Std Dev (mm)')
+        
+        self.opt_tree.column('rank', width=50)
+        self.opt_tree.column('method', width=150)
+        self.opt_tree.column('parameters', width=200)
+        self.opt_tree.column('mean_error', width=120)
+        self.opt_tree.column('improvement', width=120)
+        self.opt_tree.column('std_error', width=100)
+        
+        self.opt_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        tree_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.opt_tree.yview)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.opt_tree.configure(yscrollcommand=tree_scroll.set)
+        
+        # Action buttons
+        action_frame = ttk.Frame(results_frame)
+        action_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(action_frame, text="Apply Best Method", command=self.apply_best_method).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="Visualize Top 5", command=self.visualize_top_methods).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="Export Results...", command=self.export_optimization_results).pack(side=tk.LEFT, padx=5)
     
     def open_data_directory(self):
         """Open a data directory"""
@@ -677,9 +1171,20 @@ class LookupTableGUI:
         lut.add_data(self.pending_data['positions'], self.pending_data['distances'])
         lut.source_files = self.pending_data['files'].copy()
         
+        # Get smoothing parameters
+        smooth_enabled = self.smooth_enabled_var.get()
+        smooth_method = self.smooth_method_var.get()
+        try:
+            smooth_window = int(self.smooth_window_var.get())
+            if smooth_window < 2:
+                smooth_window = 2
+        except ValueError:
+            smooth_window = 5
+        
         # Compile
         method = self.method_var.get()
-        if lut.compile(bin_size=bin_size, method=method):
+        if lut.compile(bin_size=bin_size, method=method, smooth=smooth_enabled, 
+                      smooth_method=smooth_method, smooth_window=smooth_window):
             self.lookup_tables[name] = lut
             self.current_lut = lut
             self.update_lut_list()
@@ -745,10 +1250,14 @@ class LookupTableGUI:
         lut = self.current_lut
         
         # Update info
+        smooth_info = ""
+        if lut.metadata.get('smoothed', False):
+            smooth_info = f" | Smoothed: {lut.metadata.get('smooth_method', 'N/A')} (w={lut.metadata.get('smooth_window', 'N/A')})"
+        
         info_text = (f"Name: {lut.name} | "
                     f"Entries: {len(lut.compiled_positions)} | "
                     f"Bin Size: {lut.metadata.get('bin_size', 'N/A')} mm | "
-                    f"Method: {lut.metadata.get('method', 'N/A')}")
+                    f"Method: {lut.metadata.get('method', 'N/A')}{smooth_info}")
         self.compiled_info_label.config(text=info_text)
         
         # Populate tree
@@ -1002,12 +1511,40 @@ class LookupTableGUI:
             messagebox.showerror("Error", "Invalid sensor distance value")
             return
         
-        true_position = self.current_lut.reverse_lookup(sensor_distance)
+        # Get selected correction method
+        correction_method = self.correction_method_var.get()
+        
+        # Get method parameters from UI
+        method_params = {}
+        try:
+            method_params['degree'] = int(self.poly_degree_var.get())
+            method_params['k'] = int(self.k_neighbors_var.get())
+            method_params['power'] = float(self.distance_power_var.get())
+        except:
+            pass  # Use defaults if parsing fails
+        
+        # Apply correction
+        true_position = self.current_lut.apply_correction(sensor_distance, method=correction_method, **method_params)
+        
+        # Also show comparison with other method
+        if correction_method == 'reverse_lookup':
+            alt_position = self.current_lut.apply_correction(sensor_distance, method='error_subtraction', **method_params)
+            alt_method_name = 'Error Subtraction'
+        else:
+            alt_position = self.current_lut.apply_correction(sensor_distance, method='reverse_lookup', **method_params)
+            alt_method_name = 'Reverse Lookup'
+        
         if true_position is not None:
             error = sensor_distance - true_position
-            self.test_result_label.config(
-                text=f"Result: Sensor {sensor_distance:.2f}mm → True Position {true_position:.2f}mm | Error: {error:.2f}mm"
-            )
+            method_display = 'Reverse Lookup' if correction_method == 'reverse_lookup' else 'Error Subtraction'
+            
+            result_text = f"Result ({method_display}): Sensor {sensor_distance:.2f}mm → True Position {true_position:.2f}mm | Correction: {-error:.2f}mm\n"
+            if alt_position is not None:
+                alt_error = sensor_distance - alt_position
+                diff = abs(true_position - alt_position)
+                result_text += f"({alt_method_name}: {alt_position:.2f}mm | Correction: {-alt_error:.2f}mm | Diff: {diff:.3f}mm)"
+            
+            self.test_result_label.config(text=result_text)
         else:
             self.test_result_label.config(text="Result: Distance out of range")
     
@@ -1179,11 +1716,31 @@ class LookupTableGUI:
             'out_of_range_count': 0
         }
         
-        # Use reverse_lookup to get true position for each sensor distance
+        # Get selected correction method
+        correction_method = self.correction_method_var.get()
+        
+        # Get method parameters from UI
+        method_params = {}
+        try:
+            method_params['degree'] = int(self.poly_degree_var.get())
+        except:
+            method_params['degree'] = 3
+        
+        try:
+            method_params['k'] = int(self.k_neighbors_var.get())
+        except:
+            method_params['k'] = 3
+        
+        try:
+            method_params['power'] = float(self.distance_power_var.get())
+        except:
+            method_params['power'] = 1.0
+        
+        # Apply correction using selected method with parameters
         for distance in self.tds_data['distances']:
-            true_position = self.current_lut.reverse_lookup(distance)
-            if true_position is not None:
-                self.corrected_tds_data['corrected_positions'].append(true_position)
+            corrected_position = self.current_lut.apply_correction(distance, method=correction_method, **method_params)
+            if corrected_position is not None:
+                self.corrected_tds_data['corrected_positions'].append(corrected_position)
             else:
                 # Out of range - use original distance
                 self.corrected_tds_data['corrected_positions'].append(distance)
@@ -1217,8 +1774,26 @@ class LookupTableGUI:
         
         improvement = ((orig_mean - corr_mean) / orig_mean * 100) if orig_mean > 0 else 0
         
+        # Get method name for display with parameters
+        method_display = {
+            'reverse_lookup': 'Reverse Lookup (Linear)',
+            'error_subtraction': 'Error Subtraction (Linear)',
+            'offset_correction': 'Offset Correction',
+            'spline': 'Cubic Spline',
+            'nearest': 'Nearest Neighbor'
+        }.get(correction_method, correction_method)
+        
+        # Add parameters if applicable
+        if correction_method == 'polynomial':
+            method_display = f"Polynomial Fit (degree={method_params.get('degree', 3)})"
+        elif correction_method == 'weighted':
+            k = method_params.get('k', 3)
+            power = method_params.get('power', 1.0)
+            method_display = f"Weighted Average (k={k}, power={power:.1f})"
+        
         stats_text = (
             f"Lookup Table: {self.current_lut.name}\n"
+            f"Method: {method_display}\n"
             f"Data Points: {len(self.corrected_tds_data['positions'])}\n"
             f"Out of Range: {self.corrected_tds_data['out_of_range_count']}\n\n"
             f"Original Error:\n"
@@ -1230,6 +1805,10 @@ class LookupTableGUI:
             f"Improvement: {improvement:.1f}%"
         )
         self.correction_stats_label.config(text=stats_text)
+        
+        # Store correction method and parameters used
+        self.corrected_tds_data['correction_method'] = correction_method
+        self.corrected_tds_data['correction_params'] = method_params.copy()
         
         messagebox.showinfo("Success", 
             f"Applied LUT correction: {self.current_lut.name}\n\n"
@@ -1285,6 +1864,7 @@ class LookupTableGUI:
                 # Add metadata sheet
                 meta_ws = wb.create_sheet("METADATA")
                 meta_ws.append(['Lookup Table', self.corrected_tds_data.get('lut_name', 'N/A')])
+                meta_ws.append(['Correction Method', self.corrected_tds_data.get('correction_method', 'N/A')])
                 meta_ws.append(['Original File', os.path.basename(self.corrected_tds_data['filepath'])])
                 meta_ws.append(['Corrected Date', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
                 meta_ws.append(['Data Points', len(self.corrected_tds_data['positions'])])
@@ -1294,6 +1874,461 @@ class LookupTableGUI:
                 messagebox.showinfo("Success", f"Saved corrected data to:\n{filepath}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save: {str(e)}")
+    
+    def compare_correction_methods(self):
+        """Compare different correction methods on current TDS data or generate test data"""
+        if not self.current_lut or not hasattr(self.current_lut, 'compiled_positions'):
+            messagebox.showwarning("Warning", "No compiled lookup table selected")
+            return
+        
+        # Create comparison window
+        compare_window = tk.Toplevel(self.root)
+        compare_window.title("Correction Method Comparison")
+        compare_window.geometry("1200x800")
+        
+        # Generate test distances
+        lut = self.current_lut
+        min_dist = min(lut.compiled_distances)
+        max_dist = max(lut.compiled_distances)
+        test_distances = np.linspace(min_dist, max_dist, 100)
+        
+        # Get current parameter values from UI
+        try:
+            poly_degree = int(self.poly_degree_var.get())
+            k_neighbors = int(self.k_neighbors_var.get())
+            distance_power = float(self.distance_power_var.get())
+        except:
+            poly_degree = 3
+            k_neighbors = 3
+            distance_power = 1.0
+        
+        # Apply all methods with current parameters
+        methods = {
+            'Reverse Lookup': ('reverse_lookup', {}),
+            'Error Subtraction': ('error_subtraction', {}),
+            'Cubic Spline': ('spline', {}),
+            f'Polynomial (deg={poly_degree})': ('polynomial', {'degree': poly_degree}),
+            f'Weighted (k={k_neighbors}, p={distance_power:.1f})': ('weighted', {'k': k_neighbors, 'power': distance_power}),
+            'Nearest': ('nearest', {})
+        }
+        
+        results = {}
+        for name, (method_key, params) in methods.items():
+            try:
+                results[name] = [lut.apply_correction(d, method_key, **params) for d in test_distances]
+            except Exception as e:
+                print(f"Method {name} failed: {e}")
+                results[name] = None
+        
+        # Remove failed methods
+        results = {k: v for k, v in results.items() if v is not None}
+        
+        # Use reverse lookup as baseline
+        baseline = results.get('Reverse Lookup', list(test_distances))
+        differences = {}
+        for name, vals in results.items():
+            if name != 'Reverse Lookup' and vals:
+                differences[name] = [abs(vals[i] - baseline[i]) if vals[i] and baseline[i] else 0
+                                    for i in range(len(test_distances))]
+        
+        # Create plots
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # Plot 1: Corrected positions comparison
+        ax1 = axes[0, 0]
+        colors = ['b', 'r', 'g', 'orange', 'purple', 'brown']
+        linestyles = ['-', '--', '-.', ':', '-', '--']
+        for i, (name, vals) in enumerate(results.items()):
+            ax1.plot(test_distances, vals, 
+                    color=colors[i % len(colors)], 
+                    linestyle=linestyles[i % len(linestyles)],
+                    label=name, linewidth=1.5, alpha=0.8)
+        ax1.plot([min_dist, max_dist], [min_dist, max_dist], 'k:', label='Ideal (y=x)', alpha=0.3, linewidth=1)
+        ax1.set_xlabel('Sensor Distance (mm)')
+        ax1.set_ylabel('Corrected Position (mm)')
+        ax1.set_title('All Correction Methods Comparison')
+        ax1.legend(fontsize=8, loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Difference from baseline (Reverse Lookup)
+        ax2 = axes[0, 1]
+        for i, (name, diffs) in enumerate(differences.items()):
+            if diffs:
+                ax2.plot(test_distances, diffs, 
+                        color=colors[(i+1) % len(colors)], 
+                        label=name, linewidth=1.5, alpha=0.8)
+        ax2.set_xlabel('Sensor Distance (mm)')
+        ax2.set_ylabel('Difference from Reverse Lookup (mm)')
+        max_diff = max([max(d) for d in differences.values()]) if differences else 0
+        mean_diff = np.mean([np.mean(d) for d in differences.values()]) if differences else 0
+        ax2.set_title(f'Difference from Baseline\nMax: {max_diff:.4f}mm, Avg: {mean_diff:.4f}mm')
+        ax2.legend(fontsize=8, loc='best')
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Correction amount for each method
+        ax3 = axes[1, 0]
+        for i, (name, vals) in enumerate(results.items()):
+            corrections = [test_distances[j] - vals[j] if vals[j] else 0 
+                          for j in range(len(test_distances))]
+            ax3.plot(test_distances, corrections, 
+                    color=colors[i % len(colors)],
+                    linestyle=linestyles[i % len(linestyles)],
+                    label=name, linewidth=1.5, alpha=0.8)
+        ax3.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+        ax3.set_xlabel('Sensor Distance (mm)')
+        ax3.set_ylabel('Correction Applied (mm)')
+        ax3.set_title('Correction Amount by Method')
+        ax3.legend(fontsize=8, loc='best')
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Lookup table visualization
+        ax4 = axes[1, 1]
+        ax4.plot(lut.compiled_positions, lut.compiled_distances, 'o-', markersize=6, label='LUT Data')
+        ax4.plot([min(lut.compiled_positions), max(lut.compiled_positions)], 
+                [min(lut.compiled_positions), max(lut.compiled_positions)], 
+                'r--', alpha=0.7, label='Ideal (y=x)')
+        ax4.set_xlabel('Position (mm)')
+        ax4.set_ylabel('Distance (mm)')
+        ax4.set_title(f'Lookup Table: {lut.name}')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        fig.tight_layout()
+        
+        canvas = FigureCanvasTkAgg(fig, compare_window)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        toolbar_frame = ttk.Frame(compare_window)
+        toolbar_frame.pack(fill=tk.X)
+        NavigationToolbar2Tk(canvas, toolbar_frame)
+        
+        # Add info text
+        info_frame = ttk.Frame(compare_window)
+        info_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Build summary text
+        summary_lines = ["Method Comparison Summary:\n"]
+        summary_lines.append(f"Parameters: Polynomial degree={poly_degree}, Weighted k={k_neighbors}, power={distance_power:.1f}")
+        summary_lines.append("LINEAR: Reverse Lookup (fast, standard), Error Subtraction (alternative linear)")
+        summary_lines.append("SMOOTH: Spline (smooth curves), Polynomial (adjustable degree), Weighted (adjustable k & power)")
+        summary_lines.append("SIMPLE: Nearest Neighbor (no interpolation)\n")
+        
+        if differences:
+            max_diff = max([max(d) for d in differences.values()])
+            avg_diff = np.mean([np.mean(d) for d in differences.values()])
+            summary_lines.append(f"Max difference from baseline: {max_diff:.4f}mm")
+            summary_lines.append(f"Avg difference from baseline: {avg_diff:.4f}mm\n")
+        
+        summary_lines.append("Recommendation: Use 'Reverse Lookup' for most cases (fast, accurate).")
+        summary_lines.append("Use 'Spline' or 'Polynomial' if you need smoother corrections.")
+        
+        info_text = "\n".join(summary_lines)
+        
+        info_label = ttk.Label(info_frame, text=info_text, justify=tk.LEFT)
+        info_label.pack()
+    
+    def run_optimization(self):
+        """Run optimization to find best correction method and parameters"""
+        if not self.tds_data:
+            messagebox.showerror("Error", "Please load TDS data in the 'Test & Apply' tab first.")
+            return
+        
+        if not self.current_lut or not hasattr(self.current_lut, 'compiled_positions'):
+            messagebox.showerror("Error", "No compiled lookup table available. Please create one first.")
+            return
+        
+        # Parse search parameters
+        try:
+            poly_min = int(self.opt_poly_min_var.get())
+            poly_max = int(self.opt_poly_max_var.get())
+            k_min = int(self.opt_k_min_var.get())
+            k_max = int(self.opt_k_max_var.get())
+            power_values = [float(x.strip()) for x in self.opt_power_values_var.get().split(',')]
+        except ValueError:
+            messagebox.showerror("Error", "Invalid parameter values. Please check your inputs.")
+            return
+        
+        # Build test configurations
+        configs = []
+        
+        # Linear methods (no parameters)
+        configs.append(('Reverse Lookup', 'reverse_lookup', {}))
+        configs.append(('Error Subtraction', 'error_subtraction', {}))
+        configs.append(('Nearest Neighbor', 'nearest', {}))
+        
+        # Spline (no parameters)
+        configs.append(('Cubic Spline', 'spline', {}))
+        
+        # Polynomial with different degrees
+        for degree in range(poly_min, poly_max + 1):
+            configs.append((f'Polynomial (deg={degree})', 'polynomial', {'degree': degree}))
+        
+        # Weighted average with different k and power combinations
+        for k in range(k_min, k_max + 1):
+            for power in power_values:
+                configs.append((f'Weighted (k={k}, p={power:.1f})', 'weighted', {'k': k, 'power': power}))
+        
+        # Clear previous results
+        for item in self.opt_tree.get_children():
+            self.opt_tree.delete(item)
+        
+        self.opt_progress_label.config(text=f"Testing {len(configs)} configurations...")
+        self.root.update()
+        
+        # Calculate baseline (original) error
+        baseline_errors = [abs(d) for d in self.tds_data['deltas'] if d is not None]
+        baseline_mean = np.mean(baseline_errors)
+        
+        # Test each configuration
+        results = []
+        for i, (name, method, params) in enumerate(configs):
+            try:
+                # Apply correction to all data points
+                corrected_positions = []
+                for distance in self.tds_data['distances']:
+                    try:
+                        pos = self.current_lut.apply_correction(distance, method=method, **params)
+                        corrected_positions.append(pos)
+                    except:
+                        corrected_positions.append(distance)  # Fallback
+                
+                # Calculate errors
+                corrected_deltas = [
+                    corrected_positions[j] - self.tds_data['positions'][j]
+                    for j in range(len(self.tds_data['positions']))
+                ]
+                
+                abs_errors = [abs(d) for d in corrected_deltas]
+                mean_error = np.mean(abs_errors)
+                std_error = np.std(abs_errors)
+                improvement = ((baseline_mean - mean_error) / baseline_mean * 100) if baseline_mean > 0 else 0
+                
+                results.append({
+                    'name': name,
+                    'method': method,
+                    'params': params.copy(),
+                    'mean_error': mean_error,
+                    'std_error': std_error,
+                    'improvement': improvement,
+                    'corrected_positions': corrected_positions,
+                    'corrected_deltas': corrected_deltas
+                })
+                
+            except Exception as e:
+                # Skip failed configurations
+                pass
+            
+            # Update progress
+            if (i + 1) % 10 == 0 or (i + 1) == len(configs):
+                self.opt_progress_label.config(text=f"Tested {i + 1}/{len(configs)} configurations...")
+                self.root.update()
+        
+        # Sort by mean error (lowest is best)
+        results.sort(key=lambda x: x['mean_error'])
+        
+        # Store results
+        self.optimization_results = results
+        
+        # Display top 20 results
+        for i, result in enumerate(results[:20], 1):
+            param_str = ', '.join([f"{k}={v}" for k, v in result['params'].items()]) if result['params'] else '-'
+            
+            self.opt_tree.insert('', 'end', values=(
+                i,
+                result['name'],
+                param_str,
+                f"{result['mean_error']:.4f}",
+                f"{result['improvement']:.2f}",
+                f"{result['std_error']:.4f}"
+            ))
+        
+        # Update progress label with summary
+        if results:
+            best = results[0]
+            self.opt_progress_label.config(
+                text=f"Complete! Best: {best['name']} - {best['mean_error']:.4f}mm ({best['improvement']:.1f}% improvement)",
+                foreground='green'
+            )
+            
+            messagebox.showinfo(
+                "Optimization Complete",
+                f"Tested {len(configs)} configurations.\n\n"
+                f"Best Method: {best['name']}\n"
+                f"Mean Error: {best['mean_error']:.4f} mm\n"
+                f"Improvement: {best['improvement']:.1f}%\n\n"
+                f"See results table for details."
+            )
+        else:
+            self.opt_progress_label.config(text="No valid results found.", foreground='red')
+    
+    def apply_best_method(self):
+        """Apply the best method found by optimization to the current TDS data"""
+        if not self.optimization_results:
+            messagebox.showerror("Error", "No optimization results available. Run optimization first.")
+            return
+        
+        best = self.optimization_results[0]
+        
+        # Apply the best configuration
+        self.corrected_tds_data = {
+            'filepath': self.tds_data['filepath'],
+            'original_distances': self.tds_data['distances'].copy(),
+            'corrected_positions': best['corrected_positions'].copy(),
+            'temperatures': self.tds_data['temperatures'].copy(),
+            'positions': self.tds_data['positions'].copy(),
+            'deltas': self.tds_data['deltas'].copy(),
+            'corrected_deltas': best['corrected_deltas'].copy(),
+            'lut_name': self.current_lut.name,
+            'correction_method': best['method'],
+            'correction_params': best['params'].copy(),
+            'out_of_range_count': 0
+        }
+        
+        # Update stats display in Test & Apply tab
+        baseline_errors = [abs(d) for d in self.tds_data['deltas'] if d is not None]
+        baseline_mean = np.mean(baseline_errors) if baseline_errors else 0
+        
+        stats_text = (
+            f"Applied OPTIMIZED Method:\n"
+            f"Method: {best['name']}\n"
+            f"Mean Error: {baseline_mean:.4f}mm → {best['mean_error']:.4f}mm\n"
+            f"Improvement: {best['improvement']:.1f}%\n"
+            f"Std Dev: {best['std_error']:.4f}mm\n\n"
+            f"This was automatically selected as the best configuration.\n"
+            f"You can now save the corrected data in the 'Test & Apply' tab."
+        )
+        self.correction_stats_label.config(text=stats_text)
+        
+        messagebox.showinfo(
+            "Applied Best Method",
+            f"Applied: {best['name']}\n\n"
+            f"Mean Error: {best['mean_error']:.4f} mm\n"
+            f"Improvement: {best['improvement']:.1f}%\n\n"
+            f"Switch to 'Test & Apply' tab to save or visualize."
+        )
+        
+        # Switch to Test & Apply tab
+        self.right_notebook.select(2)
+    
+    def visualize_top_methods(self):
+        """Visualize the top 5 methods from optimization"""
+        if not self.optimization_results:
+            messagebox.showerror("Error", "No optimization results available. Run optimization first.")
+            return
+        
+        # Create visualization window
+        viz_window = tk.Toplevel(self.root)
+        viz_window.title("Top 5 Optimization Results")
+        viz_window.geometry("1200x800")
+        
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        top_5 = self.optimization_results[:5]
+        colors = ['blue', 'red', 'green', 'orange', 'purple']
+        
+        positions = self.tds_data['positions']
+        
+        # Plot 1: Corrected positions comparison
+        ax1 = axes[0, 0]
+        for i, result in enumerate(top_5):
+            ax1.scatter(positions, result['corrected_positions'], alpha=0.5, s=10, 
+                       color=colors[i], label=f"#{i+1}: {result['name']}")
+        min_val = min(positions)
+        max_val = max(positions)
+        ax1.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.3, label='Ideal')
+        ax1.set_xlabel('Reference Position (mm)')
+        ax1.set_ylabel('Corrected Position (mm)')
+        ax1.set_title('Top 5 Methods - Corrected Positions')
+        ax1.legend(fontsize=8, loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Error comparison
+        ax2 = axes[0, 1]
+        for i, result in enumerate(top_5):
+            ax2.scatter(positions, result['corrected_deltas'], alpha=0.5, s=10, 
+                       color=colors[i], label=f"#{i+1}: {result['name']}")
+        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        ax2.set_xlabel('Reference Position (mm)')
+        ax2.set_ylabel('Error (mm)')
+        ax2.set_title('Top 5 Methods - Error Distribution')
+        ax2.legend(fontsize=8, loc='best')
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Mean error comparison bar chart
+        ax3 = axes[1, 0]
+        names = [f"#{i+1}\n{r['name'][:20]}" for i, r in enumerate(top_5)]
+        mean_errors = [r['mean_error'] for r in top_5]
+        bars = ax3.bar(range(len(top_5)), mean_errors, color=colors)
+        ax3.set_xticks(range(len(top_5)))
+        ax3.set_xticklabels(names, fontsize=8)
+        ax3.set_ylabel('Mean Absolute Error (mm)')
+        ax3.set_title('Top 5 Methods - Mean Error Comparison')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels on bars
+        for i, (bar, val) in enumerate(zip(bars, mean_errors)):
+            ax3.text(bar.get_x() + bar.get_width()/2, val, f'{val:.4f}',
+                    ha='center', va='bottom', fontsize=8)
+        
+        # Plot 4: Statistics summary
+        ax4 = axes[1, 1]
+        ax4.axis('off')
+        
+        summary_text = "Top 5 Results Summary:\n\n"
+        for i, result in enumerate(top_5, 1):
+            param_str = ', '.join([f"{k}={v}" for k, v in result['params'].items()]) if result['params'] else 'none'
+            summary_text += f"#{i}: {result['name']}\n"
+            summary_text += f"   Params: {param_str}\n"
+            summary_text += f"   Mean Error: {result['mean_error']:.4f}mm\n"
+            summary_text += f"   Std Dev: {result['std_error']:.4f}mm\n"
+            summary_text += f"   Improvement: {result['improvement']:.1f}%\n\n"
+        
+        ax4.text(0.1, 0.9, summary_text, transform=ax4.transAxes,
+                fontsize=9, verticalalignment='top', family='monospace')
+        
+        fig.tight_layout()
+        
+        canvas = FigureCanvasTkAgg(fig, viz_window)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        toolbar_frame = ttk.Frame(viz_window)
+        toolbar_frame.pack(fill=tk.X)
+        NavigationToolbar2Tk(canvas, toolbar_frame)
+    
+    def export_optimization_results(self):
+        """Export optimization results to CSV file"""
+        if not self.optimization_results:
+            messagebox.showerror("Error", "No optimization results available. Run optimization first.")
+            return
+        
+        filepath = filedialog.asksaveasfilename(
+            title="Export Optimization Results",
+            defaultextension=".csv",
+            initialfile="optimization_results.csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if filepath:
+            try:
+                with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                    import csv
+                    writer = csv.writer(f)
+                    writer.writerow(['Rank', 'Method', 'Parameters', 'Mean_Error_mm', 'Std_Error_mm', 'Improvement_%'])
+                    
+                    for i, result in enumerate(self.optimization_results, 1):
+                        param_str = '; '.join([f"{k}={v}" for k, v in result['params'].items()]) if result['params'] else '-'
+                        writer.writerow([
+                            i,
+                            result['name'],
+                            param_str,
+                            f"{result['mean_error']:.6f}",
+                            f"{result['std_error']:.6f}",
+                            f"{result['improvement']:.2f}"
+                        ])
+                
+                messagebox.showinfo("Success", f"Exported {len(self.optimization_results)} results to:\n{filepath}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export results:\n{str(e)}")
     
     def show_correction_comparison(self):
         """Show comparison plot of original vs corrected data"""
